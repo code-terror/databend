@@ -2,5 +2,5 @@ project: code-terror/databend
 target: fuzz_parse_sql
 
 cmds:
-  - cmd: ./databend/tools/fuzz/hfuzz_target/x86_64-unknown-linux-gnu/release/fuzz_parse_sql
+  - cmd: ./fuzz_parse_sql
     honggfuzz: true
