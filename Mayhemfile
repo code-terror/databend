@@ -1,0 +1,6 @@
+project: code-terror/databend
+target: fuzz_parse_sql
+
+cmds:
+  - cmd: ./fuzz_parse_sql
+    honggfuzz: true
