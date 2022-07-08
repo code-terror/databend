@@ -13,6 +13,5 @@ RUN RUSTFLAGS="-Znew-llvm-pass-manager=no" HFUZZ_RUN_ARGS="--run_time $run_time 
 WORKDIR /
 COPY Mayhemfile Mayhemfile
 FROM ubuntu:20.04
-
 COPY --from=builder /databend/tools/fuzz/hfuzz_target/x86_64-unknown-linux-gnu/release/* /
 COPY --from=builder /Mayhemfile /
