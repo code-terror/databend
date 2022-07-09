@@ -1,6 +1,5 @@
 # Build Stage
 FROM ubuntu:20.04 as builder
-
 ## Install build dependencies.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y cmake clang curl git-all build-essential binutils-dev libunwind-dev libblocksruntime-dev liblzma-dev
