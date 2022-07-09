@@ -1,5 +1,5 @@
 project: code-terror/databend
-target: fuzz_parse_sql
+target: fuzz-parse-sql
 
 cmds:
   - cmd: ./fuzz_parse_sql
