@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::collections::VecDeque;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -28,22 +30,82 @@ use crate::pipelines::new::executor::executor_tasks::ExecutorTasksQueue;
 use crate::pipelines::new::executor::executor_worker_context::ExecutorWorkerContext;
 use crate::pipelines::new::pipeline::NewPipeline;
 
+pub type FinishedCallback = Arc<Box<dyn Fn(&Option<ErrorCode>) + Send + Sync + 'static>>;
+
 pub struct PipelineExecutor {
     threads_num: usize,
     graph: RunningGraph,
     workers_condvar: Arc<WorkersCondvar>,
+    query_need_abort: Arc<AtomicBool>,
     pub async_runtime: Arc<Runtime>,
     pub global_tasks_queue: Arc<ExecutorTasksQueue>,
+    on_finished_callback: FinishedCallback,
 }
 
 impl PipelineExecutor {
-    pub fn create(async_rt: Arc<Runtime>, pipeline: NewPipeline) -> Result<Arc<PipelineExecutor>> {
+    pub fn create(
+        async_rt: Arc<Runtime>,
+        query_need_abort: Arc<AtomicBool>,
+        mut pipeline: NewPipeline,
+    ) -> Result<Arc<PipelineExecutor>> {
+        let threads_num = pipeline.get_max_threads();
+        let on_finished_callback = pipeline.take_on_finished();
+
+        assert_ne!(threads_num, 0, "Pipeline max threads cannot equals zero.");
+        Self::try_create(
+            async_rt,
+            query_need_abort,
+            RunningGraph::create(pipeline)?,
+            threads_num,
+            on_finished_callback,
+        )
+    }
+
+    pub fn from_pipelines(
+        async_rt: Arc<Runtime>,
+        query_need_abort: Arc<AtomicBool>,
+        mut pipelines: Vec<NewPipeline>,
+    ) -> Result<Arc<PipelineExecutor>> {
+        if pipelines.is_empty() {
+            return Err(ErrorCode::LogicalError("Executor Pipelines is empty."));
+        }
+
+        let threads_num = pipelines
+            .iter()
+            .map(|x| x.get_max_threads())
+            .max()
+            .unwrap_or(0);
+
+        let on_finished_callbacks = pipelines
+            .iter_mut()
+            .map(|x| x.take_on_finished())
+            .collect::<Vec<_>>();
+
+        assert_ne!(threads_num, 0, "Pipeline max threads cannot equals zero.");
+        Self::try_create(
+            async_rt,
+            query_need_abort,
+            RunningGraph::from_pipelines(pipelines)?,
+            threads_num,
+            Arc::new(Box::new(move |may_error| {
+                for on_finished_callback in &on_finished_callbacks {
+                    on_finished_callback(may_error);
+                }
+            })),
+        )
+    }
+
+    fn try_create(
+        async_rt: Arc<Runtime>,
+        query_need_abort: Arc<AtomicBool>,
+        graph: RunningGraph,
+        threads_num: usize,
+        on_finished_callback: FinishedCallback,
+    ) -> Result<Arc<PipelineExecutor>> {
         unsafe {
-            let threads_num = pipeline.get_max_threads();
             let workers_condvar = WorkersCondvar::create(threads_num);
             let global_tasks_queue = ExecutorTasksQueue::create(threads_num);
 
-            let graph = RunningGraph::create(pipeline)?;
             let mut init_schedule_queue = graph.init_schedule_queue()?;
 
             let mut tasks = VecDeque::new();
@@ -56,7 +118,9 @@ impl PipelineExecutor {
                 graph,
                 threads_num,
                 workers_condvar,
+                query_need_abort,
                 global_tasks_queue,
+                on_finished_callback,
                 async_runtime: async_rt,
             }))
         }
@@ -67,18 +131,41 @@ impl PipelineExecutor {
         Ok(())
     }
 
+    pub fn is_finished(&self) -> bool {
+        self.global_tasks_queue.is_finished()
+    }
+
     pub fn execute(self: &Arc<Self>) -> Result<()> {
         let mut thread_join_handles = self.execute_threads(self.threads_num);
 
         while let Some(join_handle) = thread_join_handles.pop() {
             // flatten error.
-            match join_handle.join() {
+            let join_res = match join_handle.join() {
                 Ok(Ok(_)) => Ok(()),
                 Ok(Err(cause)) => Err(cause),
-                Err(cause) => Err(ErrorCode::LogicalError(format!("{:?}", cause))),
-            }?;
+                Err(cause) => match cause.downcast_ref::<&'static str>() {
+                    None => match cause.downcast_ref::<String>() {
+                        None => Err(ErrorCode::PanicError("Sorry, unknown panic message")),
+                        Some(message) => Err(ErrorCode::PanicError(message.to_string())),
+                    },
+                    Some(message) => Err(ErrorCode::PanicError(message.to_string())),
+                },
+            };
+
+            if let Err(error_code) = join_res {
+                let may_error = Some(error_code);
+                (self.on_finished_callback)(&may_error);
+                return Err(may_error.unwrap());
+            }
         }
 
+        if let Err(error_code) = self.graph.check_finished() {
+            let may_error = Some(error_code);
+            (self.on_finished_callback)(&may_error);
+            return Err(may_error.unwrap());
+        }
+
+        (self.on_finished_callback)(&None);
         Ok(())
     }
 
@@ -89,9 +176,29 @@ impl PipelineExecutor {
             let this = self.clone();
             let name = format!("PipelineExecutor-{}", thread_num);
             thread_join_handles.push(Thread::named_spawn(Some(name), move || unsafe {
-                match this.execute_single_thread(thread_num) {
-                    Ok(_) => Ok(()),
-                    Err(cause) => this.throw_error(thread_num, cause),
+                let this_clone = this.clone();
+                let try_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                    move || -> Result<()> {
+                        match this_clone.execute_single_thread(thread_num) {
+                            Ok(_) => Ok(()),
+                            Err(cause) => this_clone.throw_error(thread_num, cause),
+                        }
+                    },
+                ));
+
+                match try_result {
+                    Ok(Ok(_)) => Ok(()),
+                    Ok(Err(cause)) => Err(cause),
+                    Err(cause) => {
+                        this.finish()?;
+                        match cause.downcast_ref::<&'static str>() {
+                            None => match cause.downcast_ref::<String>() {
+                                None => Err(ErrorCode::PanicError("Sorry, unknown panic message")),
+                                Some(message) => Err(ErrorCode::PanicError(message.to_string())),
+                            },
+                            Some(message) => Err(ErrorCode::PanicError(message.to_string())),
+                        }
+                    }
                 }
             }));
         }
@@ -102,7 +209,7 @@ impl PipelineExecutor {
         // Wake up other threads to finish when throw error
         self.finish()?;
 
-        return Err(cause.add_message_back(format!(" (while in processor thread {})", thread_num)));
+        Err(cause.add_message_back(format!(" (while in processor thread {})", thread_num)))
     }
 
     /// # Safety
@@ -112,13 +219,14 @@ impl PipelineExecutor {
         let workers_condvar = self.workers_condvar.clone();
         let mut context = ExecutorWorkerContext::create(thread_num, workers_condvar);
 
-        while !self.global_tasks_queue.is_finished() {
+        while !self.global_tasks_queue.is_finished() && !self.need_abort() {
             // When there are not enough tasks, the thread will be blocked, so we need loop check.
             while !self.global_tasks_queue.is_finished() && !context.has_task() {
                 self.global_tasks_queue.steal_task_to_context(&mut context);
             }
 
-            while context.has_task() {
+            while !self.global_tasks_queue.is_finished() && !self.need_abort() && context.has_task()
+            {
                 if let Some(executed_pid) = context.execute_task(self)? {
                     // We immediately schedule the processor again.
                     let schedule_queue = self.graph.schedule_queue(executed_pid)?;
@@ -127,7 +235,18 @@ impl PipelineExecutor {
             }
         }
 
+        if self.need_abort() {
+            self.finish()?;
+            return Err(ErrorCode::AbortedQuery(
+                "Aborted query, because the server is shutting down or the query was killed",
+            ));
+        }
+
         Ok(())
+    }
+
+    fn need_abort(&self) -> bool {
+        self.query_need_abort.load(Ordering::Relaxed)
     }
 }
 

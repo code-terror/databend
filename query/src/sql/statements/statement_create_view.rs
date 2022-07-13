@@ -27,7 +27,7 @@ use crate::sql::statements::AnalyzableStatement;
 use crate::sql::statements::AnalyzedResult;
 use crate::sql::statements::DfQueryStatement;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DfCreateView {
     pub if_not_exists: bool,
     /// View Name
@@ -47,13 +47,13 @@ impl AnalyzableStatement for DfCreateView {
         let if_not_exists = self.if_not_exists;
         let subquery = self.subquery.clone();
         let tenant = ctx.get_tenant();
-        let (catalog, db, viewname) = resolve_table(&ctx, &self.name, "CREATE VIEW")?;
+        let (catalog, database, viewname) = resolve_table(&ctx, &self.name, "CREATE VIEW")?;
         Ok(AnalyzedResult::SimpleQuery(Box::new(PlanNode::CreateView(
             CreateViewPlan {
                 if_not_exists,
                 tenant,
                 catalog,
-                db,
+                database,
                 viewname,
                 subquery,
             },

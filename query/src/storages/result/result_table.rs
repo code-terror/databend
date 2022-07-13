@@ -18,25 +18,26 @@ use std::sync::Arc;
 use common_datavalues::DataSchemaRef;
 use common_exception::ErrorCode;
 use common_exception::Result;
-use common_meta_types::TableInfo;
-use common_meta_types::TableMeta;
+use common_meta_app::schema::TableInfo;
+use common_meta_app::schema::TableMeta;
 use common_meta_types::UserIdentity;
 use common_planners::Extras;
 use common_planners::Partitions;
 use common_planners::ReadDataSourcePlan;
 use common_planners::Statistics;
-use common_streams::SendableDataBlockStream;
-use common_tracing::tracing_futures::Instrument;
-use futures::StreamExt;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::pipelines::new::processors::port::OutputPort;
+use crate::pipelines::new::processors::TransformLimit;
 use crate::pipelines::new::NewPipeline;
+use crate::pipelines::new::SourcePipeBuilder;
 use crate::sessions::QueryContext;
 use crate::storages::fuse::io::BlockReader;
 use crate::storages::fuse::meta::SegmentInfo;
 use crate::storages::fuse::FuseTable;
 use crate::storages::result::result_locations::ResultLocations;
+use crate::storages::result::result_table_source::ResultTableSource;
 use crate::storages::Table;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -112,6 +113,7 @@ impl ResultTable {
         }))
     }
 
+    #[allow(unused)]
     fn create_block_reader(
         &self,
         ctx: &Arc<QueryContext>,
@@ -140,53 +142,57 @@ impl Table for ResultTable {
     async fn read_partitions(
         &self,
         ctx: Arc<QueryContext>,
-        _push_downs: Option<Extras>,
+        push_downs: Option<Extras>,
     ) -> Result<(Statistics, Partitions)> {
         let data_accessor = ctx.get_storage_operator()?;
         let meta_location = self.locations.get_meta_location();
         let meta_data = data_accessor.object(&meta_location).read().await?;
         let meta: ResultTableMeta = serde_json::from_slice(&meta_data)?;
+        let limit = push_downs
+            .map(|e| e.limit.unwrap_or(usize::MAX))
+            .unwrap_or(usize::MAX);
         match meta.storage {
             ResultStorageInfo::FuseSegment(seg) => {
-                Ok(FuseTable::all_columns_partitions(&seg.blocks, usize::MAX))
+                Ok(FuseTable::all_columns_partitions(&seg.blocks, limit))
             }
         }
     }
 
-    async fn read(
-        &self,
-        ctx: Arc<QueryContext>,
-        _plan: &ReadDataSourcePlan,
-    ) -> Result<SendableDataBlockStream> {
-        let block_reader = self.create_block_reader(&ctx, &None)?;
-        let iter = std::iter::from_fn(move || match ctx.clone().try_get_partitions(1) {
-            Err(_) => None,
-            Ok(parts) if parts.is_empty() => None,
-            Ok(parts) => Some(parts),
-        })
-        .flatten();
-
-        let part_stream = futures::stream::iter(iter);
-
-        let stream = part_stream
-            .then(move |part| {
-                let block_reader = block_reader.clone();
-                async move { block_reader.read(part).await }
-            })
-            .instrument(common_tracing::tracing::Span::current());
-
-        Ok(Box::pin(stream))
-    }
-
-    // todo: support
     fn read2(
         &self,
-        _ctx: Arc<QueryContext>,
-        _plan: &ReadDataSourcePlan,
-        _pipeline: &mut NewPipeline,
+        ctx: Arc<QueryContext>,
+        plan: &ReadDataSourcePlan,
+        pipeline: &mut NewPipeline,
     ) -> Result<()> {
-        Err(ErrorCode::UnImplement(
-            "result table not support read2() yet!",
-        ))
+        let block_reader = self.create_block_reader(&ctx, &None)?;
+
+        let parts_len = plan.parts.len();
+        let max_threads = ctx.get_settings().get_max_threads()? as usize;
+        let max_threads = std::cmp::min(parts_len, max_threads);
+
+        let mut source_builder = SourcePipeBuilder::create();
+
+        for _index in 0..std::cmp::max(1, max_threads) {
+            let output = OutputPort::create();
+            source_builder.add_source(
+                output.clone(),
+                ResultTableSource::create(ctx.clone(), output, block_reader.clone())?,
+            );
+        }
+
+        pipeline.add_pipe(source_builder.finalize());
+
+        match &plan.push_downs {
+            None => Ok(()),
+            Some(Extras { limit: None, .. }) => Ok(()),
+            Some(Extras {
+                limit: Some(limit), ..
+            }) => {
+                let limit = *limit;
+                pipeline.add_transform(|transform_input, transform_output| {
+                    TransformLimit::try_create(Some(limit), 0, transform_input, transform_output)
+                })
+            }
+        }
     }
 }

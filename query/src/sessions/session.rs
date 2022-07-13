@@ -16,7 +16,6 @@ use std::net::SocketAddr;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
-use common_base::infallible::RwLock;
 use common_base::mem_allocator::malloc_size;
 use common_exception::ErrorCode;
 use common_exception::Result;
@@ -24,8 +23,10 @@ use common_macros::MallocSizeOf;
 use common_meta_types::GrantObject;
 use common_meta_types::UserInfo;
 use common_meta_types::UserPrivilegeType;
+use common_users::RoleCacheMgr;
 use futures::channel::*;
 use opendal::Operator;
+use parking_lot::RwLock;
 
 use crate::catalogs::CatalogManager;
 use crate::sessions::QueryContext;
@@ -62,7 +63,8 @@ impl Session {
         mysql_connection_id: Option<u32>,
     ) -> Result<Arc<Session>> {
         let session_ctx = Arc::new(SessionContext::try_create(conf.clone())?);
-        let session_settings = Settings::try_create(&conf)?;
+        let user_api = session_mgr.get_user_api_provider();
+        let session_settings = Settings::try_create(&conf, user_api, session_ctx.clone())?;
         let ref_count = Arc::new(AtomicUsize::new(0));
         let status = Arc::new(Default::default());
         Ok(Arc::new(Session {
@@ -99,10 +101,9 @@ impl Session {
         self.session_ctx.get_abort()
     }
 
-    pub fn kill(self: &Arc<Self>) {
+    pub fn quit(self: &Arc<Self>) {
         let session_ctx = self.session_ctx.clone();
-        session_ctx.set_abort(true);
-        if session_ctx.query_context_shared_is_none() {
+        if session_ctx.get_current_query_id().is_some() {
             if let Some(io_shutdown) = session_ctx.take_io_shutdown_tx() {
                 let (tx, rx) = oneshot::channel();
                 if io_shutdown.send(tx).is_ok() {
@@ -112,6 +113,11 @@ impl Session {
             }
         }
         self.session_mgr.http_query_manager.kill_session(&self.id);
+    }
+
+    pub fn kill(self: &Arc<Self>) {
+        self.session_ctx.set_abort(true);
+        self.quit();
     }
 
     pub fn force_kill_session(self: &Arc<Self>) {
@@ -147,13 +153,13 @@ impl Session {
         Ok(shared)
     }
 
-    pub fn query_context_shared_is_none(&self) -> bool {
-        self.session_ctx.query_context_shared_is_none()
+    pub fn get_current_query_id(&self) -> Option<String> {
+        self.session_ctx.get_current_query_id()
     }
 
     pub fn attach<F>(self: &Arc<Self>, host: Option<SocketAddr>, io_shutdown: F)
     where F: FnOnce() + Send + 'static {
-        let (tx, rx) = futures::channel::oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         self.session_ctx.set_client_host(host);
         self.session_ctx.set_io_shutdown_tx(Some(tx));
 
@@ -192,7 +198,7 @@ impl Session {
     }
 
     pub fn set_current_user(self: &Arc<Self>, user: UserInfo) {
-        self.session_ctx.set_current_user(user)
+        self.session_ctx.set_current_user(user);
     }
 
     pub async fn validate_privilege(
@@ -232,6 +238,15 @@ impl Session {
         Arc::new(self.session_settings.clone())
     }
 
+    pub fn get_changed_settings(self: &Arc<Self>) -> Arc<Settings> {
+        Arc::new(self.session_settings.get_changed_settings())
+    }
+
+    pub fn apply_changed_settings(self: &Arc<Self>, changed_settings: Arc<Settings>) -> Result<()> {
+        self.session_settings
+            .apply_changed_settings(changed_settings)
+    }
+
     pub fn get_session_manager(self: &Arc<Self>) -> Arc<SessionManager> {
         self.session_mgr.clone()
     }
@@ -254,5 +269,9 @@ impl Session {
 
     pub fn get_status(self: &Arc<Self>) -> Arc<RwLock<SessionStatus>> {
         self.status.clone()
+    }
+
+    pub fn get_role_cache_manager(self: &Arc<Self>) -> Arc<RoleCacheMgr> {
+        self.session_mgr.get_role_cache_manager()
     }
 }

@@ -16,14 +16,18 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fmt::Formatter;
+use std::str;
 use std::sync::Arc;
 
-use common_base::infallible::RwLock;
 use common_datavalues::prelude::*;
 use common_exception::ErrorCode;
 use common_exception::Result;
+use common_meta_types::UserSetting;
+use common_users::UserApiProvider;
 use itertools::Itertools;
+use parking_lot::RwLock;
 
+use super::SessionContext;
 use crate::Config;
 
 #[derive(Clone)]
@@ -58,10 +62,18 @@ pub struct SettingValue {
 #[derive(Clone)]
 pub struct Settings {
     settings: Arc<RwLock<HashMap<String, SettingValue>>>,
+    #[allow(dead_code)]
+    user_api: Arc<UserApiProvider>,
+    #[allow(dead_code)]
+    session_ctx: Arc<SessionContext>,
 }
 
 impl Settings {
-    pub fn try_create(conf: &Config) -> Result<Settings> {
+    pub fn try_create(
+        conf: &Config,
+        user_api: Arc<UserApiProvider>,
+        session_ctx: Arc<SessionContext>,
+    ) -> Result<Settings> {
         let values = vec![
             // max_block_size
             SettingValue {
@@ -113,7 +125,7 @@ impl Settings {
                 default_value: DataValue::String("\n".as_bytes().to_vec()),
                 user_setting: UserSetting::create("record_delimiter", DataValue::String("\n".as_bytes().to_vec())),
                 level: ScopeLevel::Session,
-                desc: "Format record_delimiter, default value: \n",
+                desc: "Format record_delimiter, default value: \"\\n\"",
             },
             SettingValue {
                 default_value: DataValue::String(",".as_bytes().to_vec()),
@@ -134,6 +146,12 @@ impl Settings {
                 desc: "Whether to skip the input header, default value: 0",
             },
             SettingValue {
+                default_value: DataValue::String("None".as_bytes().to_vec()),
+                user_setting: UserSetting::create("compression", DataValue::String("None".as_bytes().to_vec())),
+                level: ScopeLevel::Session,
+                desc: "Format compression, default value: None",
+            },
+            SettingValue {
                 default_value: DataValue::String("UTC".as_bytes().to_vec()),
                 user_setting: UserSetting::create("timezone", DataValue::String("UTC".as_bytes().to_vec())),
                 level: ScopeLevel::Session,
@@ -145,6 +163,24 @@ impl Settings {
                 level: ScopeLevel::Session,
                 desc: "The threshold of keys to open two-level aggregation, default value: 10000",
             },
+            SettingValue {
+                default_value: DataValue::UInt64(0),
+                user_setting: UserSetting::create("enable_async_insert", DataValue::UInt64(0)),
+                level: ScopeLevel::Session,
+                desc: "Whether the client open async insert mode, default value: 0",
+            },
+            SettingValue {
+                default_value: DataValue::UInt64(1),
+                user_setting: UserSetting::create("wait_for_async_insert", DataValue::UInt64(1)),
+                level: ScopeLevel::Session,
+                desc: "Whether the client wait for the reply of async insert, default value: 1"
+            },
+            SettingValue {
+                default_value: DataValue::UInt64(100),
+                user_setting: UserSetting::create("wait_for_async_insert_timeout", DataValue::UInt64(100)),
+                level: ScopeLevel::Session,
+                desc: "The timeout in seconds for waiting for processing of async insert, default value: 100"
+            }
         ];
 
         let settings = Arc::new(RwLock::new(HashMap::default()));
@@ -158,7 +194,24 @@ impl Settings {
             }
         }
 
-        let ret = Settings { settings };
+        let ret = Settings {
+            settings,
+            user_api,
+            session_ctx,
+        };
+
+        // Overwrite settings from metasrv
+        {
+            let tenant = &ret.session_ctx.get_current_tenant();
+            let global_settings = futures::executor::block_on(
+                ret.user_api.get_setting_api_client(tenant)?.get_settings(),
+            )?;
+            for global_setting in global_settings {
+                let name = global_setting.name;
+                let val = String::from_utf8(global_setting.value.as_string()?).unwrap();
+                ret.set_settings(name, val, true)?;
+            }
+        }
 
         // Overwrite settings from conf.
         {
@@ -226,6 +279,12 @@ impl Settings {
             .and_then(|v| v.user_setting.value.as_string())
     }
 
+    pub fn get_compression(&self) -> Result<Vec<u8>> {
+        let key = "compression";
+        self.check_and_get_setting_value(key)
+            .and_then(|v| v.user_setting.value.as_string())
+    }
+
     pub fn get_empty_as_default(&self) -> Result<u64> {
         let key = "empty_as_default";
         self.try_get_u64(key)
@@ -254,6 +313,36 @@ impl Settings {
         self.try_set_u64(key, val, false)
     }
 
+    pub fn get_enable_async_insert(&self) -> Result<u64> {
+        let key = "enable_async_insert";
+        self.try_get_u64(key)
+    }
+
+    pub fn set_enable_async_insert(&self, val: u64) -> Result<()> {
+        let key = "enable_async_insert";
+        self.try_set_u64(key, val, false)
+    }
+
+    pub fn get_wait_for_async_insert(&self) -> Result<u64> {
+        let key = "wait_for_async_insert";
+        self.try_get_u64(key)
+    }
+
+    pub fn set_wait_for_async_insert(&self, val: u64) -> Result<()> {
+        let key = "wait_for_async_insert";
+        self.try_set_u64(key, val, false)
+    }
+
+    pub fn get_wait_for_async_insert_timeout(&self) -> Result<u64> {
+        let key = "wait_for_async_insert_timeout";
+        self.try_get_u64(key)
+    }
+
+    pub fn set_wait_for_async_insert_timeout(&self, val: u64) -> Result<()> {
+        let key = "wait_for_async_insert_timeout";
+        self.try_set_u64(key, val, false)
+    }
+
     pub fn has_setting(&self, key: &str) -> bool {
         let settings = self.settings.read();
         settings.get(key).is_some()
@@ -274,22 +363,42 @@ impl Settings {
     }
 
     // Set u64 value to settings map, if is_global will write to metasrv.
-    fn try_set_u64(&self, key: &str, val: u64, _is_global: bool) -> Result<()> {
+    fn try_set_u64(&self, key: &str, val: u64, is_global: bool) -> Result<()> {
         let mut settings = self.settings.write();
         let mut setting = settings
             .get_mut(key)
             .ok_or_else(|| ErrorCode::UnknownVariable(format!("Unknown variable: {:?}", key)))?;
         setting.user_setting.value = DataValue::UInt64(val);
 
+        if is_global {
+            let tenant = self.session_ctx.get_current_tenant();
+            let _ = futures::executor::block_on(
+                self.user_api
+                    .get_setting_api_client(&tenant)?
+                    .set_setting(setting.user_setting.clone()),
+            )?;
+            setting.level = ScopeLevel::Global;
+        }
+
         Ok(())
     }
 
-    fn try_set_string(&self, key: &str, val: Vec<u8>, _is_global: bool) -> Result<()> {
+    fn try_set_string(&self, key: &str, val: Vec<u8>, is_global: bool) -> Result<()> {
         let mut settings = self.settings.write();
         let mut setting = settings
             .get_mut(key)
             .ok_or_else(|| ErrorCode::UnknownVariable(format!("Unknown variable: {:?}", key)))?;
         setting.user_setting.value = DataValue::String(val);
+
+        if is_global {
+            let tenant = self.session_ctx.get_current_tenant();
+            let _ = futures::executor::block_on(
+                self.user_api
+                    .get_setting_api_client(&tenant)?
+                    .set_setting(setting.user_setting.clone()),
+            )?;
+            setting.level = ScopeLevel::Global;
+        }
 
         Ok(())
     }
@@ -314,6 +423,44 @@ impl Settings {
             result.push(res);
         }
         result
+    }
+
+    pub fn get_changed_settings(&self) -> Settings {
+        let settings = self.settings.read();
+        let mut values = vec![];
+        for (_k, v) in settings.iter().sorted_by_key(|&(k, _)| k) {
+            if v.user_setting.value != v.default_value {
+                values.push(v.clone());
+            }
+        }
+        let new_settings = Arc::new(RwLock::new(HashMap::default()));
+        {
+            let mut new_settings_mut = new_settings.write();
+            for value in values {
+                let name = value.user_setting.name.clone();
+                new_settings_mut.insert(name, value.clone());
+            }
+        }
+        Settings {
+            settings: new_settings,
+            user_api: self.user_api.clone(),
+            session_ctx: self.session_ctx.clone(),
+        }
+    }
+
+    pub fn apply_changed_settings(&self, changed_settings: Arc<Settings>) -> Result<()> {
+        let mut settings = self.settings.write();
+        let values = changed_settings.get_setting_values();
+        for value in values.into_iter() {
+            if let DataValue::Struct(vals) = value {
+                let key = vals[0].to_string();
+                let mut val = settings.get_mut(&key).ok_or_else(|| {
+                    ErrorCode::UnknownVariable(format!("Unknown variable: {:?}", key))
+                })?;
+                val.user_setting.value = vals[2].clone();
+            }
+        }
+        Ok(())
     }
 
     pub fn get_setting_values_short(&self) -> BTreeMap<String, DataValue> {
@@ -348,22 +495,18 @@ impl Settings {
 
         Ok(())
     }
-}
 
-#[derive(Clone, Debug)]
-pub struct UserSetting {
-    // The name of the setting.
-    pub name: String,
-
-    // The value of the setting.
-    pub value: DataValue,
-}
-
-impl UserSetting {
-    pub fn create(name: &str, value: DataValue) -> UserSetting {
-        UserSetting {
-            name: name.to_string(),
-            value,
+    pub fn set_batch_settings(
+        &self,
+        settings: &HashMap<String, String>,
+        is_global: bool,
+    ) -> Result<()> {
+        for (k, v) in settings.iter() {
+            if self.has_setting(k.as_str()) {
+                self.set_settings(k.to_string(), v.to_string(), is_global)?
+            }
         }
+
+        Ok(())
     }
 }

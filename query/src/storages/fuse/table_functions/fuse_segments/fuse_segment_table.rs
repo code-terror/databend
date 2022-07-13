@@ -14,21 +14,18 @@
 //
 
 use std::any::Any;
-use std::future::Future;
 use std::sync::Arc;
 
 use common_datablocks::DataBlock;
 use common_exception::Result;
-use common_meta_types::TableIdent;
-use common_meta_types::TableInfo;
-use common_meta_types::TableMeta;
+use common_meta_app::schema::TableIdent;
+use common_meta_app::schema::TableInfo;
+use common_meta_app::schema::TableMeta;
 use common_planners::Expression;
 use common_planners::Extras;
 use common_planners::Partitions;
 use common_planners::ReadDataSourcePlan;
 use common_planners::Statistics;
-use common_streams::DataBlockStream;
-use common_streams::SendableDataBlockStream;
 
 use super::fuse_segment::FuseSegment;
 use super::table_args::parse_func_history_args;
@@ -113,35 +110,6 @@ impl Table for FuseSegmentTable {
         ])
     }
 
-    async fn read(
-        &self,
-        ctx: Arc<QueryContext>,
-        _plan: &ReadDataSourcePlan,
-    ) -> Result<SendableDataBlockStream> {
-        let tenant_id = ctx.get_tenant();
-        let tbl = ctx
-            .get_catalog(CATALOG_DEFAULT)?
-            .get_table(
-                tenant_id.as_str(),
-                self.arg_database_name.as_str(),
-                self.arg_table_name.as_str(),
-            )
-            .await?;
-
-        let tbl = FuseTable::try_from_table(tbl.as_ref())?;
-
-        let blocks = vec![
-            FuseSegment::new(ctx.clone(), tbl, self.arg_snapshot_id.clone())
-                .get_segments()
-                .await?,
-        ];
-        Ok(Box::pin(DataBlockStream::create(
-            FuseSegment::schema(),
-            None,
-            blocks,
-        )))
-    }
-
     fn read2(
         &self,
         ctx: Arc<QueryContext>,
@@ -191,36 +159,34 @@ impl FuseHistorySource {
     }
 }
 
+#[async_trait::async_trait]
 impl AsyncSource for FuseHistorySource {
     const NAME: &'static str = "fuse_snapshot";
 
-    type BlockFuture<'a> = impl Future<Output = Result<Option<DataBlock>>> where Self: 'a;
-
-    fn generate(&mut self) -> Self::BlockFuture<'_> {
-        async {
-            if self.finish {
-                return Ok(None);
-            }
-
-            self.finish = true;
-            let tenant_id = self.ctx.get_tenant();
-            let tbl = self
-                .ctx
-                .get_catalog(CATALOG_DEFAULT)?
-                .get_table(
-                    tenant_id.as_str(),
-                    self.arg_database_name.as_str(),
-                    self.arg_table_name.as_str(),
-                )
-                .await?;
-
-            let tbl = FuseTable::try_from_table(tbl.as_ref())?;
-            Ok(Some(
-                FuseSegment::new(self.ctx.clone(), tbl, self.arg_snapshot_id.clone())
-                    .get_segments()
-                    .await?,
-            ))
+    #[async_trait::unboxed_simple]
+    async fn generate(&mut self) -> Result<Option<DataBlock>> {
+        if self.finish {
+            return Ok(None);
         }
+
+        self.finish = true;
+        let tenant_id = self.ctx.get_tenant();
+        let tbl = self
+            .ctx
+            .get_catalog(CATALOG_DEFAULT)?
+            .get_table(
+                tenant_id.as_str(),
+                self.arg_database_name.as_str(),
+                self.arg_table_name.as_str(),
+            )
+            .await?;
+
+        let tbl = FuseTable::try_from_table(tbl.as_ref())?;
+        Ok(Some(
+            FuseSegment::new(self.ctx.clone(), tbl, self.arg_snapshot_id.clone())
+                .get_segments()
+                .await?,
+        ))
     }
 }
 

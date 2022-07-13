@@ -24,18 +24,18 @@ use crate::protobuf::RaftReply;
 use crate::protobuf::RaftRequest;
 use crate::AppliedState;
 use crate::Endpoint;
-use crate::GetKVActionReply;
+use crate::GetKVReply;
 use crate::GetKVReq;
+use crate::ListKVReply;
 use crate::ListKVReq;
 use crate::LogEntry;
-use crate::MGetKVActionReply;
+use crate::MGetKVReply;
 use crate::MGetKVReq;
 use crate::NodeId;
-use crate::PrefixListReply;
 use crate::TxnOpResponse;
 use crate::TxnReply;
 
-#[derive(Error, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Error, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum RetryableError {
     /// Trying to write to a non-leader returns the latest leader the raft node knows,
     /// to indicate the client to retry.
@@ -43,21 +43,24 @@ pub enum RetryableError {
     ForwardToLeader { leader: NodeId },
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct JoinRequest {
     pub node_id: NodeId,
     pub endpoint: Endpoint,
+    pub grpc_api_addr: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LeaveRequest {
     pub node_id: NodeId,
 }
 
 #[derive(
-    Serialize, Deserialize, Debug, Clone, PartialEq, derive_more::From, derive_more::TryInto,
+    Serialize, Deserialize, Debug, Clone, PartialEq, Eq, derive_more::From, derive_more::TryInto,
 )]
 pub enum ForwardRequestBody {
+    Ping,
+
     Join(JoinRequest),
     Leave(LeaveRequest),
 
@@ -69,7 +72,7 @@ pub enum ForwardRequestBody {
 }
 
 /// A request that is forwarded from one raft node to another
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ForwardRequest {
     /// Forward the request to leader if the node received this request is not leader.
     pub forward_to_leader: u64,
@@ -83,16 +86,19 @@ impl ForwardRequest {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, derive_more::TryInto)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, derive_more::TryInto)]
 #[allow(clippy::large_enum_variant)]
 pub enum ForwardResponse {
+    #[try_into(ignore)]
+    Pong,
+
     Join(()),
     Leave(()),
     AppliedState(AppliedState),
 
-    GetKV(GetKVActionReply),
-    MGetKV(MGetKVActionReply),
-    ListKV(PrefixListReply),
+    GetKV(GetKVReply),
+    MGetKV(MGetKVReply),
+    ListKV(ListKVReply),
 }
 
 impl tonic::IntoRequest<RaftRequest> for ForwardRequest {

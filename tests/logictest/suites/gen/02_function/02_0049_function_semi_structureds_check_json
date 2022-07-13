@@ -8,73 +8,73 @@ statement query T
 select check_json(null);
 
 ----  
-None
+NULL
 
 statement query T 
 select check_json(true);
 
 ----  
-None
+NULL
 
 statement query T 
 select check_json(123);
 
 ----  
-None
+NULL
 
 statement query T 
 select check_json(12.34);
 
 ----  
-None
+NULL
 
 statement query T 
 select check_json('null');
 
 ----  
-None
+NULL
 
 statement query T 
 select check_json('true');
 
 ----  
-None
+NULL
 
 statement query T 
 select check_json('-17');
 
 ----  
-None
+NULL
 
 statement query T 
 select check_json('123.12');
 
 ----  
-None
+NULL
 
 statement query T 
 select check_json('1.912e2');
 
 ----  
-None
+NULL
 
 statement query T 
 select check_json('"Om ara pa ca na dhih"  ');
 
 ----  
-None
+NULL
 
 statement query T 
 select check_json('[-1, 12, 289, 2188, false]');
 
 ----  
-None
+NULL
 
 statement query T 
 select check_json('{ "x" : "abc", "y" : false, "z": 10} ');
 
 ----  
-None
+NULL
 
 statement query T 
 select check_json('[1,');
@@ -110,7 +110,7 @@ statement ok
 USE db1;
 
 statement ok
-CREATE TABLE IF NOT EXISTS t1(v String null) Engine = Memory;
+CREATE TABLE IF NOT EXISTS t1(v String null) Engine = Fuse;
 
 statement ok
 insert into t1 values (null),('null'),('true'),('123'),('"abc"'),('[1,2,3]'),('{"a":"b"}');
@@ -125,7 +125,7 @@ statement ok
 select check_json(v), v from t1;
 
 statement ok
-CREATE TABLE IF NOT EXISTS t2(v String null) Engine = Memory;
+CREATE TABLE IF NOT EXISTS t2(v String null) Engine = Fuse;
 
 statement ok
 insert into t2 values ('abc'),('[1,');

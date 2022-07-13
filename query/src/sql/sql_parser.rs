@@ -139,7 +139,6 @@ impl<'a> DfParser<'a> {
             stmts.push(statement);
             expecting_statement_delimiter = true;
         }
-
         let mut hints = Vec::new();
 
         let mut parser = DfParser::new_with_dialect(sql, dialect)?;
@@ -199,6 +198,7 @@ impl<'a> DfParser<'a> {
                     Keyword::SET => self.parse_set(),
                     Keyword::INSERT => self.parse_insert(),
                     Keyword::SELECT | Keyword::WITH | Keyword::VALUES => self.parse_query(),
+                    Keyword::DELETE => self.parse_delete(),
                     Keyword::GRANT => {
                         self.parser.next_token();
                         self.parse_grant()
@@ -208,7 +208,9 @@ impl<'a> DfParser<'a> {
                         self.parse_revoke()
                     }
                     Keyword::COPY => {
+                        *self = Self::new_with_dialect(self.sql, &SnowflakeDialect {})?;
                         self.parser.next_token();
+
                         self.parse_copy()
                     }
                     Keyword::CALL => {
@@ -222,12 +224,24 @@ impl<'a> DfParser<'a> {
                         self.parser.next_token();
                         self.parse_list_cmd()
                     }
+                    Keyword::EXISTS => {
+                        self.parser.next_token();
+                        self.parse_exists()
+                    }
 
                     Keyword::NoKeyword => match w.value.to_uppercase().as_str() {
                         // Use database
                         "USE" => self.parse_use_database(),
                         "KILL" => self.parse_kill_query(),
                         "OPTIMIZE" => self.parse_optimize(),
+                        "REMOVE" => {
+                            *self = Self::new_with_dialect(self.sql, &SnowflakeDialect {})?;
+                            self.parse_remove()
+                        }
+                        "UNDROP" => {
+                            self.parser.next_token();
+                            self.parse_undrop()
+                        }
                         _ => self.expected("Keyword", self.parser.peek_token()),
                     },
                     _ => self.expected("an SQL statement", Token::Word(w)),
@@ -243,17 +257,33 @@ impl<'a> DfParser<'a> {
             Token::Word(w) => {
                 //TODO:make stage to sql parser keyword
                 match w.keyword {
-                    Keyword::TABLE => self.parse_create_table(),
+                    Keyword::TABLE => self.parse_create_table(false),
                     Keyword::DATABASE | Keyword::SCHEMA => self.parse_create_database(),
                     Keyword::USER => self.parse_create_user(),
                     Keyword::ROLE => self.parse_create_role(),
                     Keyword::FUNCTION => self.parse_create_udf(),
                     Keyword::STAGE => self.parse_create_stage(),
                     Keyword::VIEW => self.parse_create_view(),
+                    Keyword::NoKeyword if w.value.as_str().to_uppercase() == "TRANSIENT" => {
+                        self.parse_create_transient_table()
+                    }
                     _ => self.expected("create statement", Token::Word(w)),
                 }
             }
             unexpected => self.expected("create statement", unexpected),
+        }
+    }
+
+    fn parse_create_transient_table(&mut self) -> Result<DfStatement<'a>, ParserError> {
+        let next_token = self.parser.next_token();
+        if let Token::Word(word) = next_token {
+            if word.keyword == Keyword::TABLE {
+                self.parse_create_table(true)
+            } else {
+                self.expected("create transient TABLE", Token::Word(word))
+            }
+        } else {
+            self.expected("create transient TABLE", next_token)
         }
     }
 
@@ -324,7 +354,7 @@ impl<'a> DfParser<'a> {
         match self.parser.next_token() {
             Token::Word(w) => match w.keyword {
                 Keyword::TABLE => self.parse_desc_table(),
-                Keyword::STAGE => self.parse_desc_stage(),
+                Keyword::STAGE => self.parse_describe_stage(),
 
                 _ => {
                     self.parser.prev_token();
@@ -357,10 +387,30 @@ impl<'a> DfParser<'a> {
         }
     }
 
+    fn parse_undrop(&mut self) -> Result<DfStatement<'a>, ParserError> {
+        match self.parser.next_token() {
+            Token::Word(w) => match w.keyword {
+                Keyword::TABLE => self.parse_undrop_table(),
+                Keyword::DATABASE => self.parse_undrop_database(),
+                _ => self.expected("drop statement", Token::Word(w)),
+            },
+            unexpected => self.expected("drop statement", unexpected),
+        }
+    }
+
+    /// Remove stage.
+    fn parse_remove(&mut self) -> Result<DfStatement<'a>, ParserError> {
+        match self.consume_token("REMOVE") {
+            true => self.parse_remove_stage(),
+            false => self.expected("Must REMOVE", self.parser.peek_token()),
+        }
+    }
+
     fn parse_show(&mut self) -> Result<DfStatement<'a>, ParserError> {
-        let full: bool = self.consume_token("FULL");
-        if self.consume_token("TABLES") {
-            self.parse_show_tables(full)
+        if self.consume_token("FULL") && self.consume_token("TABLES") {
+            self.parse_show_tables(true)
+        } else if self.consume_token("TABLES") {
+            self.parse_show_tables(false)
         } else if self.consume_token("TABLE") && self.consume_token("STATUS") {
             self.parse_show_tab_stat()
         } else if self.consume_token("DATABASES") || self.consume_token("SCHEMAS") {
@@ -385,6 +435,8 @@ impl<'a> DfParser<'a> {
             self.parse_show_functions()
         } else if self.consume_token("ENGINES") {
             Ok(DfStatement::ShowEngines(DfShowEngines))
+        } else if self.consume_token("STAGES") {
+            self.parse_show_stages()
         } else {
             self.expected("show statement", self.parser.peek_token())
         }

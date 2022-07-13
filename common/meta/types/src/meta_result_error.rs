@@ -17,7 +17,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// Errors about an invalid meta operation result
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, thiserror::Error)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
 pub enum MetaResultError {
     #[error("The result of an add operation is invalid: before: {prev}, after: {result}")]
     InvalidAddResult { prev: String, result: String },
@@ -27,10 +27,10 @@ pub enum MetaResultError {
 }
 
 impl MetaResultError {
-    pub fn invalid_type<T, U>(_: T, _: U) -> Self {
+    pub fn invalid_type<T, U>() -> Self {
         MetaResultError::InvalidType {
             expect: std::any::type_name::<T>().to_string(),
-            got: std::any::type_name::<T>().to_string(),
+            got: std::any::type_name::<U>().to_string(),
         }
     }
 }

@@ -17,11 +17,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use common_base::infallible::RwLock;
 use common_exception::Result;
 use common_macros::MallocSizeOf;
 use common_meta_types::UserInfo;
 use futures::channel::oneshot::Sender;
+use parking_lot::RwLock;
 
 use crate::sessions::QueryContextShared;
 use crate::Config;
@@ -141,9 +141,9 @@ impl SessionContext {
         lock.take()
     }
 
-    pub fn query_context_shared_is_none(&self) -> bool {
+    pub fn get_current_query_id(&self) -> Option<String> {
         let lock = self.query_context_shared.read();
-        lock.is_none()
+        lock.as_ref().map(|ctx| ctx.init_query_id.read().clone())
     }
 
     pub fn get_query_context_shared(&self) -> Option<Arc<QueryContextShared>> {

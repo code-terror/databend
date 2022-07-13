@@ -9,11 +9,14 @@ from hamcrest import assert_that, is_, none, is_not
 
 from log import log
 
+supports_labels = ['http', 'mysql', 'clickhouse']
+
 # statement is a statement in sql logic test
 state_regex = r"^\s*statement\s+(?P<statement>((?P<ok>OK)|((?P<error>)ERROR\s*(?P<expectError>.*))|(?P<query>QUERY\s*((" \
               r"ERROR\s+(?P<queryError>.*))|(?P<queryOptions>.*)))))$"
 
 result_regex = r"^----\s*(?P<label>.*)?$"
+condition_regex = r"^(skipif\s+(?P<skipDatabase>.*))|(onlyif\s+(?P<onlyDatabase>.*))$"
 
 
 # return the statement type
@@ -24,6 +27,10 @@ def get_statement_type(line):
 
 def get_result_label(line):
     return re.match(result_regex, line, re.MULTILINE | re.IGNORECASE)
+
+
+def get_statement_condition(line):
+    return re.match(condition_regex, line, re.IGNORECASE)
 
 
 # return false if the line is not empty
@@ -156,7 +163,7 @@ class Statement:
 class ParsedStatement(
         collections.namedtuple(
             'ParsedStatement',
-            ["at_line", "s_type", "suite_name", "text", "results"])):
+            ["at_line", "s_type", "suite_name", "text", "results", "runs_on"])):
 
     def get_fields(self):
         return self._fields
@@ -175,27 +182,44 @@ class ParsedStatement(
 
 # return all statements in a file
 def get_statements(suite_path, suite_name):
+    condition_matched = None
     lines = get_lines(suite_path)
     for line_idx, line in lines:
         if is_empty_line(line):
             # empty line or junk lines
             continue
+
         statement_type = get_statement_type(line)
 
         if statement_type is None:
+            if condition_matched is None:
+                condition_matched = get_statement_condition(line)
             continue
 
         s = Statement(statement_type)
         text = get_single_statement(lines)
         results = []
+        runs_on = set(supports_labels)
+        if condition_matched is not None:
+            if condition_matched.group("skipDatabase") is not None:
+                runs_on.remove(condition_matched.group("skipDatabase"))
+            if condition_matched.group("onlyDatabase") is not None:
+                runs_on = {
+                    x for x in runs_on
+                    if x == condition_matched.group("onlyDatabase")
+                }
+            condition_matched = None
+        log.debug("runs_on: {}".format(runs_on))
         if s.type == "query" and s.query_type is not None:
-            # TODO need a better way to get all results
-            if s.label is None:
+            # Here we use labels to figure out number of results
+            # Must have a default results (without any label)
+            # One more label means an addion results
+            result_count = 1
+            if s.label is not None:
+                result_count = len(s.label) + 1
+            for i in range(result_count):
                 results.append(get_result(lines))
-            else:
-                for i in s.label:
-                    results.append(get_result(lines))
-        yield ParsedStatement(line_idx, s, suite_name, text, results)
+        yield ParsedStatement(line_idx, s, suite_name, text, results, runs_on)
 
 
 def format_value(vals, val_num):
@@ -225,7 +249,7 @@ def safe_execute(method, *info):
 @six.add_metaclass(abc.ABCMeta)
 class SuiteRunner(object):
 
-    def __init__(self, kind):
+    def __init__(self, kind, pattern):
         self.label = None
         self.retry_time = 3
         self.driver = None
@@ -234,20 +258,31 @@ class SuiteRunner(object):
         self.kind = kind
         self.show_query_on_execution = True
         self.on_error_return = False
+        self.pattern = pattern
 
     # return all files under the path
     # format: a list of file absolute path and name(relative path)
     def fetch_files(self):
+        skip_files = os.getenv("SKIP_TEST_FILES")
+        skip_tests = skip_files.split(",") if skip_files is not None else []
+        log.debug("Skip test file list {}".format(skip_tests))
         for filename in glob.iglob('{}/**'.format(self.path), recursive=True):
             if os.path.isfile(filename):
-                self.statement_files.append(
-                    (filename, os.path.relpath(filename, self.path)))
+                if os.path.basename(filename) in skip_tests:
+                    log.info("Skip test file {}".format(filename))
+                    continue
+                if re.match(self.pattern, filename):
+                    self.statement_files.append(
+                        (filename, os.path.relpath(filename, self.path)))
+        self.statement_files.sort()
 
     def execute(self):
         # batch execute use single session
         if callable(getattr(self, "batch_execute")):
             # case batch
             for (file_path, suite_name) in self.statement_files:
+                log.info("Batch execute, suite name:{} in file {}".format(
+                    suite_name, file_path))
                 statement_list = list()
                 for state in get_statements(file_path, suite_name):
                     statement_list.append(state)
@@ -255,12 +290,19 @@ class SuiteRunner(object):
         else:
             # case one by one
             for (file_path, suite_name) in self.statement_files:
+                log.info("One by one execute, suite name:{} in file {}".format(
+                    suite_name, file_path))
                 for state in get_statements(file_path, suite_name):
                     self.execute_statement(state)
 
     def execute_statement(self, statement):
+        if self.kind not in statement.runs_on:
+            log.info(
+                "Skip execute statement with {} SuiteRunner, only runs on {}".
+                format(self.kind, statement.runs_on))
+            return
         if self.show_query_on_execution:
-            log.info("excuting statement, type {}\n{}\n".format(
+            log.info("executing statement, type {}\n{}\n".format(
                 statement.s_type.type, statement.text))
         if statement.s_type.type == "query":
             self.assert_execute_query(statement)
@@ -286,14 +328,21 @@ class SuiteRunner(object):
         compare_f = "".join(f.split())
         compare_result = "".join(resultset[2].split())
         assert compare_f == compare_result, "Expected:\n{}\n Actual:\n{}\n Statement:{}\n Start " \
-                                                  "Line: {}, Result Label: {}".format(resultset[2].rstrip(),
-                                                                                      f.rstrip(),
-                                                                                      str(statement), resultset[1],
-                                                                                      resultset[0].group("label"))
+                                            "Line: {}, Result Label: {}".format(resultset[2].rstrip(),
+                                                                                f.rstrip(),
+                                                                                str(statement), resultset[1],
+                                                                                resultset[0].group("label"))
 
     def assert_execute_query(self, statement):
+        if statement.s_type.query_type == "skipped":
+            log.warning("{} statement is skipped".format(statement))
+            return
         actual = safe_execute(lambda: self.execute_query(statement), statement)
-        f = format_value(actual, len(statement.s_type.query_type))
+        try:
+            f = format_value(actual, len(statement.s_type.query_type))
+        except Exception:
+            assert "{} statement type is query but get no result".format(
+                statement)
         assert statement.results is not None and len(
             statement.results) > 0, "No result found {}".format(statement)
         hasResult = False

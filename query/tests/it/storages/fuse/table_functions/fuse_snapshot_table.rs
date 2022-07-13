@@ -20,6 +20,7 @@ use common_exception::ErrorCode;
 use common_exception::Result;
 use common_planners::*;
 use databend_query::interpreters::CreateTableInterpreter;
+use databend_query::interpreters::Interpreter;
 use tokio_stream::StreamExt;
 
 use crate::storages::fuse::table_test_fixture::TestFixture;
@@ -88,11 +89,10 @@ async fn test_fuse_snapshot_table_read() -> Result<()> {
 
     {
         let expected = vec![
-            "+-------------+-------------------+----------------+----------------------+---------------+-------------+-----------+--------------------+------------------+",
-            "| snapshot_id | snapshot_location | format_version | previous_snapshot_id | segment_count | block_count | row_count | bytes_uncompressed | bytes_compressed |",
-            "+-------------+-------------------+----------------+----------------------+---------------+-------------+-----------+--------------------+------------------+",
-            "+-------------+-------------------+----------------+----------------------+---------------+-------------+-----------+--------------------+------------------+",
-
+            "+-------------+-------------------+----------------+----------------------+---------------+-------------+-----------+--------------------+------------------+-----------+",
+            "| snapshot_id | snapshot_location | format_version | previous_snapshot_id | segment_count | block_count | row_count | bytes_uncompressed | bytes_compressed | timestamp |",
+            "+-------------+-------------------+----------------+----------------------+---------------+-------------+-----------+--------------------+------------------+-----------+",
+            "+-------------+-------------------+----------------+----------------------+---------------+-------------+-----------+--------------------+------------------+-----------+",
         ];
 
         expects_ok(

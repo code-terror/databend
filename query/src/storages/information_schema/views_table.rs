@@ -15,9 +15,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use common_meta_types::TableIdent;
-use common_meta_types::TableInfo;
-use common_meta_types::TableMeta;
+use common_meta_app::schema::TableIdent;
+use common_meta_app::schema::TableInfo;
+use common_meta_app::schema::TableMeta;
 
 use crate::storages::view::view_table::QUERY;
 use crate::storages::view::ViewTable;
@@ -37,17 +37,7 @@ impl ViewsTable {
             engine = 'MaterializedView' AS is_insertable_into,
             0 AS is_trigger_updatable,
             0 AS is_trigger_deletable,
-            0 AS is_trigger_insertable_into,
-            database AS TABLE_CATALOG,
-            database AS TABLE_SCHEMA,
-            name AS TABLE_NAME,
-            NULL AS VIEW_DEFINITION,
-            'NONE' AS CHECK_OPTION,
-            0 AS IS_UPDATABLE,
-            engine = 'MaterializedView' AS IS_INSERTABLE_INTO,
-            0 AS IS_TRIGGER_UPDATABLE,
-            0 AS IS_TRIGGER_DELETABLE,
-            0 AS IS_TRIGGER_INSERTABLE_INTO
+            0 AS is_trigger_insertable_into
         FROM system.tables
         WHERE engine LIKE '%View';";
 

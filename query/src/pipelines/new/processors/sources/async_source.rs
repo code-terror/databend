@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::sync::Arc;
 
 use common_base::base::Progress;
 use common_base::base::ProgressValues;
 use common_datablocks::DataBlock;
 use common_exception::Result;
-use futures::Future;
 
 use crate::pipelines::new::processors::port::OutputPort;
 use crate::pipelines::new::processors::processor::Event;
@@ -26,12 +26,13 @@ use crate::pipelines::new::processors::processor::ProcessorPtr;
 use crate::pipelines::new::processors::Processor;
 use crate::sessions::QueryContext;
 
+#[async_trait::async_trait]
 pub trait AsyncSource: Send {
     const NAME: &'static str;
-    type BlockFuture<'a>: Future<Output = Result<Option<DataBlock>>> + Send
-    where Self: 'a;
+    const SKIP_EMPTY_DATA_BLOCK: bool = true;
 
-    fn generate(&mut self) -> Self::BlockFuture<'_>;
+    #[async_trait::unboxed_simple]
+    async fn generate(&mut self) -> Result<Option<DataBlock>>;
 }
 
 // TODO: This can be refactored using proc macros
@@ -69,6 +70,10 @@ impl<T: 'static + AsyncSource> Processor for AsyncSourcer<T> {
         T::NAME
     }
 
+    fn as_any(&mut self) -> &mut dyn Any {
+        self
+    }
+
     fn event(&mut self) -> Result<Event> {
         if self.is_finish {
             self.output.finish();
@@ -102,6 +107,9 @@ impl<T: 'static + AsyncSource> Processor for AsyncSourcer<T> {
                         bytes: data_block.memory_size(),
                     };
                     self.scan_progress.incr(&progress_values);
+                }
+
+                if !T::SKIP_EMPTY_DATA_BLOCK || !data_block.is_empty() {
                     self.generated_data = Some(data_block)
                 }
             }

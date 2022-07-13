@@ -20,7 +20,7 @@ use common_exception::Result;
 use crate::sql::binder::Binder;
 use crate::sql::optimizer::SExpr;
 use crate::sql::planner::semantic::TypeChecker;
-use crate::sql::plans::LimitPlan;
+use crate::sql::plans::Limit;
 use crate::sql::BindContext;
 
 impl<'a> Binder {
@@ -31,11 +31,11 @@ impl<'a> Binder {
         limit: Option<&Expr<'a>>,
         offset: &Option<Expr<'a>>,
     ) -> Result<SExpr> {
-        let type_checker = TypeChecker::new(bind_context, self.ctx.clone());
+        let type_checker = TypeChecker::new(bind_context, self.ctx.clone(), self.metadata.clone());
 
         let limit_cnt = match limit {
             Some(Expr::Literal { span: _, lit: x }) => {
-                let (value, data_type) = type_checker.resolve_literal(x, None)?;
+                let box (value, data_type) = type_checker.resolve_literal(x, None)?;
                 if !data_type.data_type_id().is_integer() {
                     return Err(ErrorCode::IllegalDataType("Unsupported limit type"));
                 }
@@ -48,16 +48,16 @@ impl<'a> Binder {
         };
 
         let offset_cnt = if let Some(Expr::Literal { span: _, lit: x }) = offset {
-            let (value, data_type) = type_checker.resolve_literal(x, None)?;
+            let box (value, data_type) = type_checker.resolve_literal(x, None)?;
             if !data_type.data_type_id().is_integer() {
-                return Err(ErrorCode::IllegalDataType("Unsupported limit type"));
+                return Err(ErrorCode::IllegalDataType("Unsupported offset type"));
             }
             value.as_u64()? as usize
         } else {
             0
         };
 
-        let limit_plan = LimitPlan {
+        let limit_plan = Limit {
             limit: limit_cnt,
             offset: offset_cnt,
         };

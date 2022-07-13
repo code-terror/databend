@@ -1,26 +1,26 @@
 statement ok
-CREATE TABLE strings_oct_sample_u8 (value UInt8 null) engine=Memory;
+CREATE TABLE strings_oct_sample_u8 (value UInt8 null) Engine = Fuse;
 
 statement ok
-CREATE TABLE strings_oct_sample_u16 (value UInt16 null) engine=Memory;
+CREATE TABLE strings_oct_sample_u16 (value UInt16 null) Engine = Fuse;
 
 statement ok
-CREATE TABLE strings_oct_sample_u32 (value UInt32 null) engine=Memory;
+CREATE TABLE strings_oct_sample_u32 (value UInt32 null) Engine = Fuse;
 
 statement ok
-CREATE TABLE strings_oct_sample_u64 (value UInt64 null) engine=Memory;
+CREATE TABLE strings_oct_sample_u64 (value UInt64 null) Engine = Fuse;
 
 statement ok
-CREATE TABLE strings_oct_sample_i8 (value Int8 null) engine=Memory;
+CREATE TABLE strings_oct_sample_i8 (value Int8 null) Engine = Fuse;
 
 statement ok
-CREATE TABLE strings_oct_sample_i16 (value Int16 null) engine=Memory;
+CREATE TABLE strings_oct_sample_i16 (value Int16 null) Engine = Fuse;
 
 statement ok
-CREATE TABLE strings_oct_sample_i32 (value Int32 null) engine=Memory;
+CREATE TABLE strings_oct_sample_i32 (value Int32 null) Engine = Fuse;
 
 statement ok
-CREATE TABLE strings_oct_sample_i64 (value Int64 null) engine=Memory;
+CREATE TABLE strings_oct_sample_i64 (value Int64 null) Engine = Fuse;
 
 statement ok
 INSERT INTO strings_oct_sample_u8 VALUES (0), (255), (127), (NULL);
@@ -53,7 +53,7 @@ select oct(value) from strings_oct_sample_u8;
 0
 0377
 0177
-None
+NULL
 
 statement query T 
 select oct(value) from strings_oct_sample_u16;
@@ -62,7 +62,7 @@ select oct(value) from strings_oct_sample_u16;
 0
 0177777
 0100000
-None
+NULL
 
 statement query T 
 select oct(value) from strings_oct_sample_u32;
@@ -71,7 +71,7 @@ select oct(value) from strings_oct_sample_u32;
 0
 037777777777
 017777777777
-None
+NULL
 
 statement query T 
 select oct(value) from strings_oct_sample_u64;
@@ -80,7 +80,7 @@ select oct(value) from strings_oct_sample_u64;
 0
 01777777777777777777777
 0777777777777777777777
-None
+NULL
 
 statement query T 
 select oct(value) from strings_oct_sample_i8;
@@ -89,7 +89,7 @@ select oct(value) from strings_oct_sample_i8;
 0
 -0200
 0177
-None
+NULL
 
 statement query T 
 select oct(value) from strings_oct_sample_i16;
@@ -98,7 +98,7 @@ select oct(value) from strings_oct_sample_i16;
 0
 -0100000
 077777
-None
+NULL
 
 statement query T 
 select oct(value) from strings_oct_sample_i32;
@@ -107,7 +107,7 @@ select oct(value) from strings_oct_sample_i32;
 0
 -020000000000
 017777777777
-None
+NULL
 
 statement query T 
 select oct(value) from strings_oct_sample_i64;
@@ -116,7 +116,7 @@ select oct(value) from strings_oct_sample_i64;
 0
 -01000000000000000000000
 0777777777777777777777
-None
+NULL
 
 statement query T 
 select oct(-128);

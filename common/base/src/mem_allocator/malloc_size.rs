@@ -307,7 +307,7 @@ impl<T> MallocShallowSizeOf for std::collections::VecDeque<T> {
         if ops.has_malloc_enclosing_size_of() {
             if let Some(front) = self.front() {
                 // The front element is an interior pointer.
-                unsafe { ops.malloc_enclosing_size_of(&*front) }
+                unsafe { ops.malloc_enclosing_size_of(front) }
             } else {
                 // This assumes that no memory is allocated when the VecDeque is empty.
                 0
@@ -524,12 +524,6 @@ impl<T: MallocSizeOf> MallocSizeOf for parking_lot::Mutex<T> {
     }
 }
 
-impl<T: MallocSizeOf> MallocSizeOf for crate::infallible::Mutex<T> {
-    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
-        self.lock().size_of(ops)
-    }
-}
-
 impl<T: MallocSizeOf> MallocSizeOf for std::sync::RwLock<T> {
     fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
         self.read().unwrap().size_of(ops)
@@ -537,12 +531,6 @@ impl<T: MallocSizeOf> MallocSizeOf for std::sync::RwLock<T> {
 }
 
 impl<T: MallocSizeOf> MallocSizeOf for parking_lot::RwLock<T> {
-    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
-        self.read().size_of(ops)
-    }
-}
-
-impl<T: MallocSizeOf> MallocSizeOf for crate::infallible::RwLock<T> {
     fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
         self.read().size_of(ops)
     }

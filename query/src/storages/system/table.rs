@@ -17,14 +17,11 @@ use std::sync::Arc;
 
 use common_datablocks::DataBlock;
 use common_exception::Result;
-use common_meta_types::TableInfo;
+use common_meta_app::schema::TableInfo;
 use common_planners::Extras;
 use common_planners::Partitions;
 use common_planners::ReadDataSourcePlan;
 use common_planners::Statistics;
-use common_streams::DataBlockStream;
-use common_streams::SendableDataBlockStream;
-use futures::Future;
 
 use crate::pipelines::new::processors::port::OutputPort;
 use crate::pipelines::new::processors::processor::ProcessorPtr;
@@ -82,19 +79,6 @@ impl<TTable: 'static + SyncSystemTable> Table for SyncOneBlockSystemTable<TTable
         push_downs: Option<Extras>,
     ) -> Result<(Statistics, Partitions)> {
         self.inner_table.get_partitions(ctx, push_downs)
-    }
-
-    async fn read(
-        &self,
-        ctx: Arc<QueryContext>,
-        _: &ReadDataSourcePlan,
-    ) -> Result<SendableDataBlockStream> {
-        let block = self.inner_table.get_full_data(ctx)?;
-        Ok(Box::pin(DataBlockStream::create(
-            block.schema().clone(),
-            None,
-            vec![block],
-        )))
     }
 
     fn read2(
@@ -202,19 +186,6 @@ impl<TTable: 'static + AsyncSystemTable> Table for AsyncOneBlockSystemTable<TTab
         self.inner_table.get_partitions(ctx, push_downs).await
     }
 
-    async fn read(
-        &self,
-        ctx: Arc<QueryContext>,
-        _: &ReadDataSourcePlan,
-    ) -> Result<SendableDataBlockStream> {
-        let block = self.inner_table.get_full_data(ctx).await?;
-        Ok(Box::pin(DataBlockStream::create(
-            block.schema().clone(),
-            None,
-            vec![block],
-        )))
-    }
-
     fn read2(
         &self,
         ctx: Arc<QueryContext>,
@@ -259,18 +230,17 @@ where Self: AsyncSource
     }
 }
 
+#[async_trait::async_trait]
 impl<TTable: 'static + AsyncSystemTable> AsyncSource for SystemTableAsyncSource<TTable> {
     const NAME: &'static str = TTable::NAME;
-    type BlockFuture<'a> = impl Future<Output = Result<Option<DataBlock>>> where Self: 'a;
 
-    fn generate(&mut self) -> Self::BlockFuture<'_> {
-        async move {
-            if self.finished {
-                return Ok(None);
-            }
-
-            self.finished = true;
-            Ok(Some(self.inner.get_full_data(self.context.clone()).await?))
+    #[async_trait::unboxed_simple]
+    async fn generate(&mut self) -> Result<Option<DataBlock>> {
+        if self.finished {
+            return Ok(None);
         }
+
+        self.finished = true;
+        Ok(Some(self.inner.get_full_data(self.context.clone()).await?))
     }
 }

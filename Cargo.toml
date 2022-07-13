@@ -5,28 +5,36 @@ members = [
     "common/base",
     "common/building",
     "common/cache",
+    "common/codegen",
     "common/contexts",
     "common/datablocks",
     "common/datavalues",
     "common/exception",
-    "common/grpc",
+    "common/expression",
+    "common/formats",
     "common/functions",
+    "common/grpc",
+    "common/hashtable",
+    "common/hive-meta-store",
+    "common/http",
     "common/io",
     "common/macros",
     "common/management",
-    "common/planners",
-    "common/proto-conv",
-    "common/protos",
     "common/meta/api",
     "common/meta/embedded",
     "common/meta/raft-store",
     "common/meta/sled-store",
+    "common/meta/store",
     "common/meta/types",
-    "common/streams",
-    "common/codegen",
-    "common/tracing",
     "common/metrics",
-    "common/hive-meta-store",
+    "common/planners",
+    "common/proto-conv",
+    "common/protos",
+    "common/meta/app",
+    "common/streams",
+    "common/tracing",
+    "common/users",
+    "common/storage",
 
     # Query
     "query",
@@ -36,7 +44,12 @@ members = [
 
     # Tools
     "tools/fuzz",
+    "tools/metabench",
     "tools/metactl",
+
+    # Hack
+    # This crate is used to hack our cargo.lock to resovle CVEs and so on.
+    "common/dep-hack",
 ]
 
 [profile.release]
@@ -64,5 +77,5 @@ object = { opt-level = 3 }
 rustc-demangle = { opt-level = 3 }
 
 [patch.crates-io]
-parquet2 = { version = "0.12", optional = true, git = "https://github.com/datafuse-extras/parquet2", rev = "03c108b" }
+parquet2 = { version = "0.14.1", optional = true, git = "https://github.com/datafuse-extras/parquet2", rev = "3a468fc3c4" }
 chrono = { git = "https://github.com/datafuse-extras/chrono", rev = "279f590" }

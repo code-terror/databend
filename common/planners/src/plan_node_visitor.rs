@@ -16,8 +16,11 @@ use common_exception::Result;
 
 use crate::plan_broadcast::BroadcastPlan;
 use crate::plan_subqueries_set::SubQueriesSetPlan;
+use crate::plan_table_undrop::UndropTablePlan;
+use crate::plan_window_func::WindowFuncPlan;
 use crate::AggregatorFinalPlan;
 use crate::AggregatorPartialPlan;
+use crate::AlterTableClusterKeyPlan;
 use crate::AlterUserPlan;
 use crate::AlterUserUDFPlan;
 use crate::AlterViewPlan;
@@ -30,16 +33,19 @@ use crate::CreateUserPlan;
 use crate::CreateUserStagePlan;
 use crate::CreateUserUDFPlan;
 use crate::CreateViewPlan;
+use crate::DeletePlan;
 use crate::DescribeTablePlan;
 use crate::DescribeUserStagePlan;
 use crate::DropDatabasePlan;
 use crate::DropRolePlan;
+use crate::DropTableClusterKeyPlan;
 use crate::DropTablePlan;
 use crate::DropUserPlan;
 use crate::DropUserStagePlan;
 use crate::DropUserUDFPlan;
 use crate::DropViewPlan;
 use crate::EmptyPlan;
+use crate::ExistsTablePlan;
 use crate::ExplainPlan;
 use crate::Expression;
 use crate::ExpressionPlan;
@@ -57,6 +63,7 @@ use crate::PlanNode;
 use crate::ProjectionPlan;
 use crate::ReadDataSourcePlan;
 use crate::RemotePlan;
+use crate::RemoveUserStagePlan;
 use crate::RenameDatabasePlan;
 use crate::RenameTablePlan;
 use crate::RevokePrivilegePlan;
@@ -70,6 +77,7 @@ use crate::SinkPlan;
 use crate::SortPlan;
 use crate::StagePlan;
 use crate::TruncateTablePlan;
+use crate::UndropDatabasePlan;
 use crate::UseDatabasePlan;
 
 /// `PlanVisitor` implements visitor pattern(reference [syn](https://docs.rs/syn/1.0.72/syn/visit/trait.Visit.html)) for `PlanNode`.
@@ -127,6 +135,7 @@ pub trait PlanVisitor {
             PlanNode::Broadcast(plan) => self.visit_broadcast(plan),
             PlanNode::Remote(plan) => self.visit_remote(plan),
             PlanNode::Having(plan) => self.visit_having(plan),
+            PlanNode::WindowFunc(plan) => self.visit_window_func(plan),
             PlanNode::Expression(plan) => self.visit_expression(plan),
             PlanNode::Limit(plan) => self.visit_limit(plan),
             PlanNode::LimitBy(plan) => self.visit_limit_by(plan),
@@ -143,6 +152,9 @@ pub trait PlanVisitor {
             // Insert.
             PlanNode::Insert(plan) => self.visit_insert_into(plan),
 
+            // Insert.
+            PlanNode::Delete(plan) => self.visit_delete_into(plan),
+
             // Copy.
             PlanNode::Copy(plan) => self.visit_copy(plan),
 
@@ -157,13 +169,15 @@ pub trait PlanVisitor {
             PlanNode::DropDatabase(plan) => self.visit_drop_database(plan),
             PlanNode::ShowCreateDatabase(plan) => self.visit_show_create_database(plan),
             PlanNode::RenameDatabase(plan) => self.visit_rename_database(plan),
-
+            PlanNode::UndropDatabase(plan) => self.visit_undrop_database(plan),
             // Table.
             PlanNode::CreateTable(plan) => self.visit_create_table(plan),
             PlanNode::DropTable(plan) => self.visit_drop_table(plan),
+            PlanNode::UndropTable(plan) => self.visit_undrop_table(plan),
             PlanNode::RenameTable(plan) => self.visit_rename_table(plan),
             PlanNode::TruncateTable(plan) => self.visit_truncate_table(plan),
             PlanNode::OptimizeTable(plan) => self.visit_optimize_table(plan),
+            PlanNode::ExistsTable(plan) => self.visit_exists_table(plan),
             PlanNode::DescribeTable(plan) => self.visit_describe_table(plan),
             PlanNode::ShowCreateTable(plan) => self.visit_show_create_table(plan),
 
@@ -194,6 +208,7 @@ pub trait PlanVisitor {
             PlanNode::DropUserStage(plan) => self.visit_drop_user_stage(plan),
             PlanNode::DescribeUserStage(plan) => self.visit_describe_user_stage(plan),
             PlanNode::List(plan) => self.visit_list(plan),
+            PlanNode::RemoveUserStage(plan) => self.visit_remove_user_stage(plan),
 
             // UDF.
             PlanNode::CreateUserUDF(plan) => self.visit_create_user_udf(plan),
@@ -208,6 +223,10 @@ pub trait PlanVisitor {
 
             // Kill.
             PlanNode::Kill(plan) => self.visit_kill_query(plan),
+
+            // Cluster Key.
+            PlanNode::AlterTableClusterKey(plan) => self.visit_alter_table_cluster_key(plan),
+            PlanNode::DropTableClusterKey(plan) => self.visit_drop_table_cluster_key(plan),
         }
     }
 
@@ -288,6 +307,11 @@ pub trait PlanVisitor {
     fn visit_having(&mut self, plan: &HavingPlan) -> Result<()> {
         self.visit_plan_node(plan.input.as_ref())?;
         self.visit_expr(&plan.predicate)
+    }
+
+    fn visit_window_func(&mut self, plan: &WindowFuncPlan) -> Result<()> {
+        self.visit_plan_node(plan.input.as_ref())?;
+        self.visit_expr(&plan.window_func)
     }
 
     fn visit_sort(&mut self, plan: &SortPlan) -> Result<()> {
@@ -379,6 +403,10 @@ pub trait PlanVisitor {
         Ok(())
     }
 
+    fn visit_exists_table(&mut self, _: &ExistsTablePlan) -> Result<()> {
+        Ok(())
+    }
+
     fn visit_describe_user_stage(&mut self, _: &DescribeUserStagePlan) -> Result<()> {
         Ok(())
     }
@@ -391,6 +419,14 @@ pub trait PlanVisitor {
         Ok(())
     }
 
+    fn visit_undrop_table(&mut self, _: &UndropTablePlan) -> Result<()> {
+        Ok(())
+    }
+
+    fn visit_undrop_database(&mut self, _: &UndropDatabasePlan) -> Result<()> {
+        Ok(())
+    }
+
     fn visit_use_database(&mut self, _: &UseDatabasePlan) -> Result<()> {
         Ok(())
     }
@@ -400,6 +436,10 @@ pub trait PlanVisitor {
     }
 
     fn visit_insert_into(&mut self, _: &InsertPlan) -> Result<()> {
+        Ok(())
+    }
+
+    fn visit_delete_into(&mut self, _: &DeletePlan) -> Result<()> {
         Ok(())
     }
 
@@ -463,6 +503,18 @@ pub trait PlanVisitor {
     }
 
     fn visit_alter_user_udf(&mut self, _: &AlterUserUDFPlan) -> Result<()> {
+        Ok(())
+    }
+
+    fn visit_remove_user_stage(&mut self, _: &RemoveUserStagePlan) -> Result<()> {
+        Ok(())
+    }
+
+    fn visit_alter_table_cluster_key(&mut self, _: &AlterTableClusterKeyPlan) -> Result<()> {
+        Ok(())
+    }
+
+    fn visit_drop_table_cluster_key(&mut self, _: &DropTableClusterKeyPlan) -> Result<()> {
         Ok(())
     }
 }

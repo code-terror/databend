@@ -20,7 +20,9 @@ use std::sync::Once;
 use once_cell::sync::Lazy;
 use opentelemetry::global;
 use opentelemetry::sdk::propagation::TraceContextPropagator;
+use sentry_tracing::EventFilter;
 use tracing::Event;
+use tracing::Level;
 use tracing::Subscriber;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::RollingFileAppender;
@@ -36,7 +38,6 @@ use tracing_subscriber::fmt::FmtContext;
 use tracing_subscriber::fmt::FormatEvent;
 use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::fmt::FormattedFields;
-use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::EnvFilter;
@@ -49,7 +50,12 @@ pub fn init_default_ut_tracing() {
 
     START.call_once(|| {
         let mut g = GLOBAL_UT_LOG_GUARD.as_ref().lock().unwrap();
-        *g = Some(init_global_tracing("unittest", "_logs_unittest", "DEBUG"));
+        *g = Some(init_global_tracing(
+            "unittest",
+            "_logs_unittest",
+            "DEBUG",
+            None,
+        ));
     });
 }
 
@@ -61,49 +67,86 @@ static GLOBAL_UT_LOG_GUARD: Lazy<Arc<Mutex<Option<Vec<WorkerGuard>>>>> =
 /// A local tracing collection(maybe for testing) can be done with a local jaeger server.
 /// To report tracing data and view it:
 ///   docker run -d -p6831:6831/udp -p6832:6832/udp -p16686:16686 jaegertracing/all-in-one:latest
-///   RUST_LOG=trace cargo test
+///   DATABEND_JAEGER_AGENT_ENDPOINT=localhost:6831 RUST_LOG=trace cargo test
 ///   open http://localhost:16686/
 ///
 /// To adjust batch sending delay, use `OTEL_BSP_SCHEDULE_DELAY`:
-/// RUST_LOG=trace OTEL_BSP_SCHEDULE_DELAY=1 cargo test
+/// DATABEND_JAEGER_AGENT_ENDPOINT=localhost:6831 RUST_LOG=trace OTEL_BSP_SCHEDULE_DELAY=1 cargo test
 ///
-// TODO(xp): use DATABEND_JAEGER to assign jaeger server address.
-pub fn init_global_tracing(app_name: &str, dir: &str, level: &str) -> Vec<WorkerGuard> {
+// TODO(xp): use DATABEND_JAEGER_AGENT_ENDPOINT to assign jaeger server address.
+pub fn init_global_tracing(
+    app_name: &str,
+    dir: &str,
+    level: &str,
+    enable_stdout: Option<bool>,
+) -> Vec<WorkerGuard> {
     let mut guards = vec![];
 
     // Enable log compatible layer to convert log record to tracing span.
     LogTracer::init().expect("log tracer must be valid");
 
-    // Stdout layer.
-    let (stdout_writer, stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
-    let stdout_logging_layer = Layer::new().with_writer(stdout_writer);
-    guards.push(stdout_guard);
-
-    // JSON log layer.
+    // JSON layer:
+    // Log files will be stored in log.dir, default is '.databend/logs'.
     let rolling_appender = RollingFileAppender::new(Rotation::HOURLY, dir, app_name);
     let (rolling_writer, rolling_writer_guard) = tracing_appender::non_blocking(rolling_appender);
     let file_logging_layer = BunyanFormattingLayer::new(app_name.to_string(), rolling_writer);
     guards.push(rolling_writer_guard);
 
     // Jaeger layer.
-    global::set_text_map_propagator(TraceContextPropagator::new());
-    let tracer = opentelemetry_jaeger::new_pipeline()
-        .with_service_name(app_name)
-        .install_batch(opentelemetry::runtime::Tokio)
-        .expect("install");
-    let jaeger_layer = Some(tracing_opentelemetry::layer().with_tracer(tracer));
+    let mut jaeger_layer = None;
+    let jaeger_agent_endpoint =
+        env::var("DATABEND_JAEGER_AGENT_ENDPOINT").unwrap_or_else(|_| "".to_string());
+    if !jaeger_agent_endpoint.is_empty() {
+        global::set_text_map_propagator(TraceContextPropagator::new());
+
+        let tracer = opentelemetry_jaeger::new_pipeline()
+            .with_service_name(app_name)
+            .with_agent_endpoint(jaeger_agent_endpoint)
+            .with_auto_split_batch(true)
+            .install_batch(opentelemetry::runtime::Tokio)
+            .expect("install");
+
+        jaeger_layer = Some(tracing_opentelemetry::layer().with_tracer(tracer));
+    }
+
+    // Sentry Layer.
+    let mut sentry_layer = None;
+    let bend_sentry_env = env::var("DATABEND_SENTRY_DSN").unwrap_or_else(|_| "".to_string());
+    if !bend_sentry_env.is_empty() {
+        sentry_layer = Some(
+            sentry_tracing::layer()
+                .event_filter(|metadata| match metadata.level() {
+                    &Level::ERROR | &Level::WARN => EventFilter::Event,
+                    &Level::INFO | &Level::DEBUG | &Level::TRACE => EventFilter::Breadcrumb,
+                })
+                .span_filter(|metadata| {
+                    matches!(
+                        metadata.level(),
+                        &Level::ERROR | &Level::WARN | &Level::INFO | &Level::DEBUG
+                    )
+                }),
+        );
+    }
+
+    let stdout_layer = if enable_stdout == Some(false) {
+        None
+    } else {
+        Some(fmt::layer().with_ansi(atty::is(atty::Stream::Stdout)))
+    };
 
     // Use env RUST_LOG to initialize log if present.
-    // Otherwise use the specified level.
+    // Otherwise, use the specified level.
     let directives = env::var(EnvFilter::DEFAULT_ENV).unwrap_or_else(|_x| level.to_string());
     let env_filter = EnvFilter::new(directives);
     let subscriber = Registry::default()
+        .with(stdout_layer)
         .with(env_filter)
         .with(JsonStorageLayer)
-        .with(stdout_logging_layer)
         .with(file_logging_layer)
-        .with(jaeger_layer);
+        .with(jaeger_layer)
+        .with(sentry_layer);
 
+    // For tokio-console
     #[cfg(feature = "console")]
     let subscriber = subscriber.with(console_subscriber::spawn());
 
@@ -122,6 +165,7 @@ pub fn init_query_logger(
     let rolling_appender = RollingFileAppender::new(Rotation::HOURLY, dir, log_name);
     let (rolling_writer, rolling_writer_guard) = tracing_appender::non_blocking(rolling_appender);
     let format = tracing_subscriber::fmt::format()
+        .with_ansi(atty::is(atty::Stream::Stdout))
         .without_time()
         .with_target(false)
         .with_level(false)
@@ -174,6 +218,7 @@ where
         let fmt_level = meta.level().as_str();
         write!(writer, "{:>5} ", fmt_level)?;
 
+        write!(writer, "{:0>15?} ", std::thread::current().name())?;
         write!(writer, "{:0>2?} ", std::thread::current().id())?;
 
         if let Some(scope) = ctx.event_scope() {

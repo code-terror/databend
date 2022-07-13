@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod block_buffer;
 mod execute_state;
 mod expirable;
 mod expiring_map;
@@ -25,6 +24,7 @@ pub(crate) use execute_state::ExecuteState;
 pub use execute_state::ExecuteStateKind;
 pub(crate) use execute_state::Executor;
 pub use execute_state::HttpQueryHandle;
+pub use execute_state::Progresses;
 pub use http_query::HttpQuery;
 pub use http_query::HttpQueryRequest;
 pub use http_query::HttpQueryResponseInternal;

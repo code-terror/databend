@@ -25,8 +25,8 @@ use common_io::prelude::FormatSettings;
 use serde_json::Value as JsonValue;
 
 use crate::servers::http::v1::json_block::block_to_json_value;
-use crate::servers::http::v1::query::block_buffer::BlockBuffer;
 use crate::servers::http::v1::JsonBlock;
+use crate::storages::result::block_buffer::BlockBuffer;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Wait {
@@ -53,22 +53,31 @@ pub struct PageManager {
     block_end: bool,
     schema: DataSchemaRef,
     last_page: Option<Page>,
-    page_buffer: VecDeque<Vec<Vec<JsonValue>>>,
+    row_buffer: VecDeque<Vec<JsonValue>>,
     block_buffer: Arc<BlockBuffer>,
+    string_fields: bool,
+    format_settings: FormatSettings,
 }
 
 impl PageManager {
-    pub fn new(max_rows_per_page: usize, block_buffer: Arc<BlockBuffer>) -> PageManager {
+    pub fn new(
+        max_rows_per_page: usize,
+        block_buffer: Arc<BlockBuffer>,
+        string_fields: bool,
+        format_settings: FormatSettings,
+    ) -> PageManager {
         PageManager {
             total_rows: 0,
             last_page: None,
             total_pages: 0,
             end: false,
             block_end: false,
-            page_buffer: Default::default(),
+            row_buffer: Default::default(),
             schema: Arc::new(DataSchema::empty()),
             block_buffer,
             max_rows_per_page,
+            string_fields,
+            format_settings,
         }
     }
 
@@ -80,15 +89,10 @@ impl PageManager {
         }
     }
 
-    pub async fn get_a_page(
-        &mut self,
-        page_no: usize,
-        tp: &Wait,
-        format: &FormatSettings,
-    ) -> Result<Page> {
+    pub async fn get_a_page(&mut self, page_no: usize, tp: &Wait) -> Result<Page> {
         let next_no = self.total_pages;
         if page_no == next_no && !self.end {
-            let (block, end) = self.collect_new_page(tp, format).await?;
+            let (block, end) = self.collect_new_page(tp).await?;
             let num_row = block.num_rows();
             self.total_rows += num_row;
             let page = Page {
@@ -115,34 +119,35 @@ impl PageManager {
         }
     }
 
-    async fn collect_new_page(
-        &mut self,
-        tp: &Wait,
-        format: &FormatSettings,
-    ) -> Result<(JsonBlock, bool)> {
-        let res: Vec<Vec<JsonValue>> = vec![];
-        let mut res = self.page_buffer.pop_front().unwrap_or(res);
-        loop {
-            if res.len() >= self.max_rows_per_page {
+    async fn collect_new_page(&mut self, tp: &Wait) -> Result<(JsonBlock, bool)> {
+        let format_settings = &self.format_settings;
+        let mut res: Vec<Vec<JsonValue>> = Vec::with_capacity(self.max_rows_per_page);
+        while res.len() < self.max_rows_per_page {
+            if let Some(row) = self.row_buffer.pop_front() {
+                res.push(row)
+            } else {
                 break;
-            };
+            }
+        }
+        loop {
+            assert!(self.max_rows_per_page >= res.len());
+            let remain = self.max_rows_per_page - res.len();
+            if remain == 0 {
+                break;
+            }
             let (block, done) = self.block_buffer.pop().await?;
             match block {
                 Some(block) => {
                     if self.schema.fields().is_empty() {
                         self.schema = block.schema().clone();
                     }
-                    let mut iter = block_to_json_value(&block, format)?.into_iter().peekable();
-                    if res.is_empty() {
-                        let mut chunk = iter.by_ref().take(self.max_rows_per_page).collect();
-                        res.append(&mut chunk);
-                    } else {
-                        res = iter.by_ref().take(self.max_rows_per_page).collect();
-                    }
-                    while iter.peek().is_some() {
-                        let chunk: Vec<_> = iter.by_ref().take(self.max_rows_per_page).collect();
-                        self.page_buffer.push_back(chunk)
-                    }
+                    let mut iter =
+                        block_to_json_value(&block, format_settings, self.string_fields)?
+                            .into_iter()
+                            .peekable();
+                    let chunk: Vec<_> = iter.by_ref().take(remain).collect();
+                    res.extend(chunk);
+                    self.row_buffer = iter.by_ref().collect();
                     if done {
                         self.block_end = true;
                         break;
@@ -180,7 +185,7 @@ impl PageManager {
         if !self.block_end {
             self.block_end = self.block_buffer.is_pop_done().await;
         }
-        let end = self.block_end && self.page_buffer.is_empty();
+        let end = self.block_end && self.row_buffer.is_empty();
         Ok((block, end))
     }
 

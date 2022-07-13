@@ -18,10 +18,10 @@ use std::sync::mpsc::Receiver;
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 
-use common_base::infallible::Mutex;
 use common_datablocks::DataBlock;
 use common_exception::ErrorCode;
 use common_exception::Result;
+use parking_lot::Mutex;
 
 use crate::pipelines::new::executor::PipelineExecutor;
 use crate::pipelines::new::processors::port::OutputPort;
@@ -89,12 +89,13 @@ impl PipelinePushingExecutor {
 
     pub fn try_create(
         ctx: Arc<QueryContext>,
+        query_need_abort: Arc<AtomicBool>,
         mut pipeline: NewPipeline,
     ) -> Result<PipelinePushingExecutor> {
         let state = State::create();
         let async_runtime = ctx.get_storage_runtime();
         let sender = Self::wrap_pipeline(ctx, &mut pipeline)?;
-        let executor = PipelineExecutor::create(async_runtime, pipeline)?;
+        let executor = PipelineExecutor::create(async_runtime, query_need_abort, pipeline)?;
         Ok(PipelinePushingExecutor {
             state,
             sender,
@@ -121,6 +122,10 @@ impl PipelinePushingExecutor {
 
             state.finished.store(true, Ordering::Release);
         }
+    }
+
+    pub fn get_inner(&self) -> Arc<PipelineExecutor> {
+        self.executor.clone()
     }
 
     pub fn finish(&self) -> Result<()> {

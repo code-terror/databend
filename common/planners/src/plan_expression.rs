@@ -21,6 +21,7 @@ use common_exception::ErrorCode;
 use common_exception::Result;
 use common_functions::aggregates::AggregateFunctionFactory;
 use common_functions::aggregates::AggregateFunctionRef;
+use common_functions::window::WindowFrame;
 use once_cell::sync::Lazy;
 
 use crate::plan_expression_common::ExpressionDataTypeVisitor;
@@ -28,7 +29,7 @@ use crate::ExpressionVisitor;
 use crate::PlanNode;
 
 static OP_SET: Lazy<HashSet<&'static str>> = Lazy::new(|| {
-    ["database", "version", "current_user"]
+    ["database", "version", "current_user", "user"]
         .iter()
         .copied()
         .collect()
@@ -92,6 +93,22 @@ pub enum Expression {
         distinct: bool,
         params: Vec<DataValue>,
         args: Vec<Expression>,
+    },
+
+    /// WindowFunction
+    WindowFunction {
+        /// operation performed
+        op: String,
+        /// params
+        params: Vec<DataValue>,
+        /// arguments
+        args: Vec<Expression>,
+        /// partition by
+        partition_by: Vec<Expression>,
+        /// order by
+        order_by: Vec<Expression>,
+        /// window frame
+        window_frame: Option<WindowFrame>,
     },
 
     /// A sort expression, that can be used to sort values.
@@ -219,7 +236,7 @@ impl Expression {
                 if *pg_style {
                     format!("{}::{}", expr.column_name(), data_type.sql_name())
                 } else if data_type.is_nullable() {
-                    let ty: &NullableType = data_type.as_any().downcast_ref().unwrap();
+                    let ty: NullableType = data_type.to_owned().try_into().unwrap();
                     format!(
                         "try_cast({} as {})",
                         expr.column_name(),
@@ -326,9 +343,10 @@ impl Expression {
                 }
                 AggregateFunctionFactory::instance().get(&func_name, params.clone(), fields)
             }
-            _ => Err(ErrorCode::LogicalError(
-                "Expression must be aggregated function",
-            )),
+            _ => Err(ErrorCode::LogicalError(format!(
+                "Expression must be aggregated function, {:?}",
+                self
+            ))),
         }
     }
 
@@ -421,6 +439,53 @@ impl fmt::Debug for Expression {
                 Ok(())
             }
 
+            Expression::WindowFunction {
+                op,
+                params,
+                args,
+                partition_by,
+                order_by,
+                window_frame,
+            } => {
+                let args_column_name = args.iter().map(Expression::column_name).collect::<Vec<_>>();
+                let params_name = params
+                    .iter()
+                    .map(|v| DataValue::custom_display(v, true))
+                    .collect::<Vec<_>>();
+
+                if params.is_empty() {
+                    write!(f, "{}", op)?;
+                } else {
+                    write!(f, "{}({})", op, params_name.join(", "))?;
+                }
+
+                write!(f, "({})", args_column_name.join(","))?;
+
+                write!(f, " OVER(")?;
+                if !partition_by.is_empty() {
+                    write!(f, "PARTITION BY {:?}", partition_by)?;
+                }
+                if !order_by.is_empty() {
+                    if !partition_by.is_empty() {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "ORDER BY {:?}", order_by)?;
+                }
+                if let Some(window_frame) = window_frame {
+                    if !partition_by.is_empty() || !order_by.is_empty() {
+                        write!(f, " ")?;
+                    }
+                    write!(
+                        f,
+                        "{} BETWEEN {} AND {}",
+                        window_frame.units, window_frame.start_bound, window_frame.end_bound
+                    )?;
+                }
+                write!(f, ")")?;
+
+                Ok(())
+            }
+
             Expression::Sort { expr, .. } => write!(f, "{:?}", expr),
             Expression::Wildcard => write!(f, "*"),
             Expression::Cast {
@@ -431,7 +496,7 @@ impl fmt::Debug for Expression {
                 if *pg_style {
                     write!(f, "{:?}::{}", expr, data_type.name())
                 } else if data_type.is_nullable() {
-                    let ty: &NullableType = data_type.as_any().downcast_ref().unwrap();
+                    let ty: NullableType = data_type.to_owned().try_into().unwrap();
                     write!(f, "try_cast({:?} as {})", expr, ty.inner_type().name())
                 } else {
                     write!(f, "cast({:?} as {})", expr, data_type.name())

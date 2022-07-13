@@ -52,29 +52,11 @@ async fn test_show_tab_stat_interpreter() -> Result<()> {
         }
     }
 
-    // show table status.
-    {
-        let plan = PlanParser::parse(ctx.clone(), "show table status").await?;
-        let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-        assert_eq!(executor.name(), "ShowTabStatInterpreter");
-        let stream = executor.execute(None).await?;
-        let result = stream.try_collect::<Vec<_>>().await?;
-        let expected = vec![
-            "+------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------------+-------------+------------+-----------+----------+---------+",
-            "| Name | Engine | Version | Row_format | Rows | Avg_row_length | Data_length | Max_data_length | Index_length | Data_free | Auto_increment | Create_time                   | Update_time | Check_time | Collation | Checksum | Comment |",
-            "+------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------------+-------------+------------+-----------+----------+---------+",
-            "| bend | FUSE   | 0       | NULL       | 0    | NULL           | 0           | NULL            | NULL         | NULL      | NULL           | 1970-01-01 00:00:00.000 +0000 | NULL        | NULL       | NULL      | NULL     |         |",
-            "| data | FUSE   | 0       | NULL       | 0    | NULL           | 0           | NULL            | NULL         | NULL      | NULL           | 1970-01-01 00:00:00.000 +0000 | NULL        | NULL       | NULL      | NULL     |         |",
-            "+------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------------+-------------+------------+-----------+----------+---------+",
-                ];
-        common_datablocks::assert_blocks_sorted_eq(expected, result.as_slice());
-    }
-
     // show table status like '%da%'.
     {
         let plan = PlanParser::parse(ctx.clone(), "show table status like '%da%'").await?;
         let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-        assert_eq!(executor.name(), "ShowTabStatInterpreter");
+        assert_eq!(executor.name(), "ShowTablesStatusInterpreter");
         let stream = executor.execute(None).await?;
         let result = stream.try_collect::<Vec<_>>().await?;
         let expected = vec![
@@ -91,7 +73,7 @@ async fn test_show_tab_stat_interpreter() -> Result<()> {
     {
         let plan = PlanParser::parse(ctx.clone(), "show table status where Name != 'data'").await?;
         let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-        assert_eq!(executor.name(), "ShowTabStatInterpreter");
+        assert_eq!(executor.name(), "ShowTablesStatusInterpreter");
         let stream = executor.execute(None).await?;
         let result = stream.try_collect::<Vec<_>>().await?;
         let expected = vec![
@@ -108,7 +90,7 @@ async fn test_show_tab_stat_interpreter() -> Result<()> {
     {
         let plan = PlanParser::parse(ctx.clone(), "show table status from db1").await?;
         let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-        assert_eq!(executor.name(), "ShowTabStatInterpreter");
+        assert_eq!(executor.name(), "ShowTablesStatusInterpreter");
         let stream = executor.execute(None).await?;
         let result = stream.try_collect::<Vec<_>>().await?;
         let expected = vec![
@@ -126,7 +108,7 @@ async fn test_show_tab_stat_interpreter() -> Result<()> {
     {
         let plan = PlanParser::parse(ctx.clone(), "show table status in db1").await?;
         let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-        assert_eq!(executor.name(), "ShowTabStatInterpreter");
+        assert_eq!(executor.name(), "ShowTablesStatusInterpreter");
         let stream = executor.execute(None).await?;
         let result = stream.try_collect::<Vec<_>>().await?;
 

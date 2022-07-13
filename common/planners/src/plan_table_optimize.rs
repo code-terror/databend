@@ -14,29 +14,26 @@
 
 use std::sync::Arc;
 
-use bitflags::bitflags;
 use common_datavalues::DataSchema;
 use common_datavalues::DataSchemaRef;
 
-bitflags! {
-    #[derive(serde::Serialize, serde::Deserialize)]
-    pub struct Optimization: u32 {
-        const PURGE   = 0b00000001;
-        const COMPACT = 0b00000010;
-        const ALL = Self::PURGE.bits | Self::COMPACT.bits;
-    }
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct OptimizeTablePlan {
     pub catalog: String,
     pub database: String,
     pub table: String,
-    pub operation: Optimization,
+    pub action: OptimizeTableAction,
 }
 
 impl OptimizeTablePlan {
     pub fn schema(&self) -> DataSchemaRef {
         Arc::new(DataSchema::empty())
     }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
+pub enum OptimizeTableAction {
+    All,
+    Purge,
+    Compact,
 }

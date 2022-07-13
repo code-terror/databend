@@ -37,7 +37,7 @@ This handler return results in `pages` with long-polling.
 ### Quick Example
 
 ```shell
-curl --request POST '127.0.0.1:8001/v1/query/' --header 'Content-Type: application/json' --data-raw '{"sql": "SELECT avg(number) FROM numbers(100000000)"}'
+curl -u root: --request POST '127.0.0.1:8001/v1/query/' --header 'Content-Type: application/json' --data-raw '{"sql": "SELECT avg(number) FROM numbers(100000000)"}'
 ```
 
 the SQL will be run with default session and pagination settings, mainly:
@@ -76,6 +76,14 @@ you are expected to get JSON like this (formatted):
     "scan_progress": {
       "rows": 100000000,
       "bytes": 800000000
+    },
+    "write_progress": {
+      "rows": 0,
+      "bytes": 0
+    },
+    "result_progress": {
+      "rows": 0,
+      "bytes": 0 
     },
     "running_time_ms": 466.85395800000003
   },

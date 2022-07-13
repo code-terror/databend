@@ -10,7 +10,7 @@ cd "$SCRIPT_PATH/../.." || exit
 
 function add_to_profile {
 	eval "$1"
-	FOUND=$(grep -c "$1" <"${HOME}/.profile")
+	FOUND=$(grep -c "$1" "${HOME}/.profile" || true)
 	if [ "$FOUND" == "0" ]; then
 		echo "$1" >>"${HOME}"/.profile
 	fi
@@ -198,7 +198,7 @@ function install_jdk {
 
 	case "$PACKAGE_MANAGER" in
 	apt-get)
-		install_pkg openjdk-11-jre-headless "$PACKAGE_MANAGER"
+		install_pkg openjdk-11-jdk-headless "$PACKAGE_MANAGER"
 		;;
 	pacman)
 		install_pkg jre11-openjdk-headless "$PACKAGE_MANAGER"
@@ -296,18 +296,6 @@ function install_cargo_binary {
 	fi
 }
 
-function install_toolchain {
-	version=$1
-	echo "==> Installing ${version} of rust toolchain..."
-	rustup install "$version"
-	rustup set profile minimal
-	rustup component add rustfmt --toolchain "$version"
-	rustup component add rust-src --toolchain "$version"
-	rustup component add clippy --toolchain "$version"
-	rustup component add miri --toolchain "$version"
-	rustup default "$version"
-}
-
 function usage {
 	cat <<EOF
     usage: $0 [options]
@@ -318,6 +306,7 @@ function usage {
         -d Install development tools
         -p Install profile
         -s Install codegen tools
+        -t Install tpch data set
         -v Verbose mode
 EOF
 }
@@ -342,6 +331,15 @@ Build tools (since -b or no option was provided):
   * protobuf-compiler
   * thrift-compiler
   * openjdk
+  * tpch dataset for benchmark
+EOF
+	fi
+
+	if [[ "$INSTALL_CHECK_TOOLS" == "true" ]]; then
+		cat <<EOF
+Check tools (since -c was provided):
+  * lcov
+  * tools from rust-tools.txt ( e.g. cargo-audit, cargo-udeps, taplo-cli)
 EOF
 	fi
 
@@ -349,9 +347,10 @@ EOF
 		cat <<EOF
 Development tools (since -d was provided):
   * mysql client
-  * python3 (boto3, yapf, ...)
-  * lcov
-  * tools from rust-tools.txt ( e.g. cargo-audit, cargo-udeps, taplo-cli)
+  * python3 (boto3, yapf, yamllint, ...)
+  * python database drivers (mysql-connector-python, pymysql, sqlalchemy, clickhouse_driver)
+  * sqllogic test dependencies (PyHamcrest, environs, fire, ...)
+  * fuzz test dependencies (fuzzingbook)
 EOF
 	fi
 
@@ -368,6 +367,12 @@ Moreover, ~/.profile will be updated (since -p was provided).
 EOF
 	fi
 
+	if [[ "$INSTALL_TPCH_DATA" == "true" ]]; then
+		cat <<EOF
+Tpch dataset (since -t was provided):
+EOF
+	fi
+
 	cat <<EOF
 If you'd prefer to install these dependencies yourself, please exit this script
 now with Ctrl-C.
@@ -377,18 +382,23 @@ EOF
 AUTO_APPROVE=false
 VERBOSE=false
 INSTALL_BUILD_TOOLS=false
+INSTALL_CHECK_TOOLS=false
 INSTALL_DEV_TOOLS=false
 INSTALL_PROFILE=false
 INSTALL_CODEGEN=false
+INSTALL_TPCH_DATA=false
 
 # parse args
-while getopts "ybdpsv" arg; do
+while getopts "ybcdpstv" arg; do
 	case "$arg" in
 	y)
 		AUTO_APPROVE="true"
 		;;
 	b)
 		INSTALL_BUILD_TOOLS="true"
+		;;
+	c)
+		INSTALL_CHECK_TOOLS="true"
 		;;
 	d)
 		INSTALL_DEV_TOOLS="true"
@@ -402,6 +412,10 @@ while getopts "ybdpsv" arg; do
 	v)
 		VERBOSE="true"
 		;;
+	t)
+		INSTALL_TPCH_DATA="true"
+		;;
+
 	*)
 		usage
 		exit 0
@@ -414,8 +428,10 @@ if [[ "$VERBOSE" == "true" ]]; then
 fi
 
 if [[ "$INSTALL_BUILD_TOOLS" == "false" ]] &&
+	[[ "$INSTALL_CHECK_TOOLS" == "false" ]] &&
 	[[ "$INSTALL_DEV_TOOLS" == "false" ]] &&
 	[[ "$INSTALL_PROFILE" == "false" ]] &&
+	[[ "$INSTALL_TPCH_DATA" == "false" ]] &&
 	[[ "$INSTALL_CODEGEN" == "false" ]]; then
 	INSTALL_BUILD_TOOLS="true"
 fi
@@ -494,7 +510,23 @@ if [[ "$INSTALL_BUILD_TOOLS" == "true" ]]; then
 	install_pkg clang "$PACKAGE_MANAGER"
 	install_pkg llvm "$PACKAGE_MANAGER"
 
-	install_toolchain "$RUST_TOOLCHAIN"
+	# Any call to cargo will make rustup install the correct toolchain
+	cargo version
+fi
+
+if [[ "$INSTALL_CHECK_TOOLS" == "true" ]]; then
+	if [[ -f scripts/setup/rust-tools.txt ]]; then
+		export RUSTFLAGS="-C target-feature=-crt-static"
+		while IFS='@' read -r tool version; do
+			install_cargo_binary "$tool" "$version"
+		done <scripts/setup/rust-tools.txt
+	fi
+
+	if [[ "$PACKAGE_MANAGER" == "apk" ]]; then
+		# needed by lcov
+		echo http://nl.alpinelinux.org/alpine/edge/testing >>/etc/apk/repositories
+	fi
+	install_pkg lcov "$PACKAGE_MANAGER"
 fi
 
 if [[ "$INSTALL_DEV_TOOLS" == "true" ]]; then
@@ -514,22 +546,18 @@ if [[ "$INSTALL_DEV_TOOLS" == "true" ]]; then
 		install_pkg py3-pip "$PACKAGE_MANAGER"
 		install_pkg libffi-dev "$PACKAGE_MANAGER"
 	fi
-	python3 -m pip install --quiet boto3 "moto[all]" yapf shfmt-py toml
+	python3 -m pip install --quiet boto3 "moto[all]" yapf shfmt-py toml yamllint
 	# drivers
 	python3 -m pip install --quiet mysql-connector-python pymysql sqlalchemy clickhouse_driver
+	# sqllogic dependencies
+	python3 -m pip install --quiet mysql-connector six PyHamcrest requests environs fire
+	# fuzz dependencies
+	python3 -m pip install --quiet fuzzingbook
 
-	if [[ -f scripts/setup/rust-tools.txt ]]; then
-		export RUSTFLAGS="-C target-feature=-crt-static"
-		while IFS='@' read -r tool version; do
-			install_cargo_binary "$tool" "$version"
-		done <scripts/setup/rust-tools.txt
-	fi
-
-	if [[ "$PACKAGE_MANAGER" == "apk" ]]; then
-		# needed by lcov
-		echo http://nl.alpinelinux.org/alpine/edge/testing >>/etc/apk/repositories
-	fi
-	install_pkg lcov "$PACKAGE_MANAGER"
+	# sqllogic clickhouse dependencies
+	# a temp hack only to make logic test work on click house as quickly as possible
+	# we need another way to support session on clickhouse-sqlalchemy
+	python3 -m pip install https://github.com/youngsofun/clickhouse-sqlalchemy/archive/a116e3162c699c12e63a689385b547f639c13018.zip
 fi
 
 if [[ "$INSTALL_CODEGEN" == "true" ]]; then
@@ -548,11 +576,42 @@ if [[ "$INSTALL_CODEGEN" == "true" ]]; then
 	"${PRE_COMMAND[@]}" python3 -m pip install --quiet coscmd PyYAML
 fi
 
-[[ "${AUTO_APPROVE}" == "false" ]] && cat <<EOF
-Finished installing all dependencies.
+if [[ "$INSTALL_TPCH_DATA" == "true" ]]; then
+	# Construct a docker imagine to generate tpch-data
+	if [[ -z $2 ]]; then
+		docker build -f scripts/setup/tpchdata.dockerfile -t databend:latest .
+	else
+		docker build -f scripts/setup/tpchdata.dockerfile -t databend:latest --build-arg scale_factor=$2 .
+	fi
+	# Generate data into the ./data directory if it does not already exist
+	FILE=benchmark/tpch/data/customer.tbl
+	if test -f "$FILE"; then
+		echo "$FILE exists."
+	else
+		mkdir $(pwd)/benchmark/tpch/data 2>/dev/null
+		docker run -v $(pwd)/benchmark/tpch/data:/data --rm databend:latest
+	fi
+fi
+
+if [[ "${AUTO_APPROVE}" == "false" ]]; then
+	if [[ "$INSTALL_BUILD_TOOLS" == "true" ]]; then
+		cat <<EOF
+Finished installing all build dependencies.
 
 You should now be able to build the project by running:
 	cargo build
 EOF
+	fi
+
+	if [[ "$INSTALL_DEV_TOOLS" == "true" ]]; then
+		cat <<EOF
+Finished installing all dev dependencies.
+
+You should now be able to run tests with:
+	make xxx-test (check Makefile for detailed target)
+EOF
+	fi
+
+fi
 
 exit 0

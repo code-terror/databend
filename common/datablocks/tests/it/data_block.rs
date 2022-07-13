@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_arrow::arrow::array::ArrayRef;
 use common_arrow::arrow::chunk::Chunk;
+use common_arrow::ArrayRef;
 use common_datablocks::DataBlock;
 use common_datavalues::prelude::*;
 use common_exception::Result;
@@ -23,7 +23,7 @@ use pretty_assertions::assert_eq;
 fn test_data_block() -> Result<()> {
     let schema = DataSchemaRefExt::create(vec![DataField::new("a", i64::to_data_type())]);
 
-    let block = DataBlock::create(schema.clone(), vec![Series::from_data(vec![1, 2, 3])]);
+    let block = DataBlock::create(schema.clone(), vec![Series::from_data(vec![1i64, 2, 3])]);
     assert_eq!(&schema, block.schema());
 
     assert_eq!(3, block.num_rows());

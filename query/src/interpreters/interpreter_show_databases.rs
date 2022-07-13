@@ -22,7 +22,6 @@ use common_planners::ShowDatabasesPlan;
 use common_streams::SendableDataBlockStream;
 
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::interpreters::SelectInterpreter;
 use crate::optimizers::Optimizers;
 use crate::sessions::QueryContext;
@@ -34,12 +33,12 @@ pub struct ShowDatabasesInterpreter {
 }
 
 impl ShowDatabasesInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, plan: ShowDatabasesPlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(ShowDatabasesInterpreter { ctx, plan }))
+    pub fn try_create(ctx: Arc<QueryContext>, plan: ShowDatabasesPlan) -> Result<Self> {
+        Ok(ShowDatabasesInterpreter { ctx, plan })
     }
 
     fn build_query(&self) -> Result<String> {
-        return match &self.plan.kind {
+        match &self.plan.kind {
             PlanShowKind::All => {
                 Ok("SELECT name AS Database FROM system.databases ORDER BY name".to_string())
             }
@@ -51,7 +50,7 @@ impl ShowDatabasesInterpreter {
                 "SELECT name As Database FROM system.databases WHERE {} ORDER BY name",
                 v
             )),
-        };
+        }
     }
 }
 

@@ -58,6 +58,7 @@ fn copy_from_external_test() -> Result<()> {
             on_error: "".to_string(),
             size_limit: "".to_string(),
             validation_mode: "".to_string(),
+            query: None,
         }),
     }];
 
@@ -65,7 +66,7 @@ fn copy_from_external_test() -> Result<()> {
         if test.err.is_empty() {
             expect_parse_ok(test.query, DfStatement::Copy(test.expect.unwrap()))?;
         } else {
-            expect_parse_err(test.query, test.err.to_string())?;
+            expect_parse_err(test.query, test.err)?;
         }
     }
 

@@ -32,7 +32,7 @@ use common_planners::InsertPlan;
 use common_planners::PlanNode;
 use common_tracing::tracing;
 use futures::channel::mpsc;
-use futures::channel::mpsc::Receiver;
+use futures::channel::mpsc::UnboundedReceiver;
 use futures::SinkExt;
 use futures::StreamExt;
 use metrics::histogram;
@@ -64,7 +64,7 @@ impl InteractiveWorkerBase {
     pub async fn do_query(
         ch_ctx: &mut CHContext,
         session: SessionRef,
-    ) -> Result<Receiver<BlockItem>> {
+    ) -> Result<UnboundedReceiver<BlockItem>> {
         let query = &ch_ctx.state.query;
         tracing::debug!("{}", query);
 
@@ -99,7 +99,7 @@ impl InteractiveWorkerBase {
         insert: InsertPlan,
         ch_ctx: &mut CHContext,
         ctx: Arc<QueryContext>,
-    ) -> Result<Receiver<BlockItem>> {
+    ) -> Result<UnboundedReceiver<BlockItem>> {
         let sample_block = DataBlock::empty_with_schema(insert.schema());
         let (sender, rec) = channel(4);
         ch_ctx.state.out = Some(sender);
@@ -114,52 +114,28 @@ impl InteractiveWorkerBase {
         let interpreter = InterpreterFactory::get(ctx.clone(), PlanNode::Insert(insert))?;
         let name = interpreter.name().to_string();
 
-        if ctx.get_settings().get_enable_new_processor_framework()? != 0
-            && ctx.get_cluster().is_empty()
-        {
-            let output_port = OutputPort::create();
-            let sync_receiver_ck_source = SyncReceiverCkSource::create(
-                ctx.clone(),
-                ck_stream.input.into_inner(),
-                output_port.clone(),
-                sc,
-            )?;
-            let mut source_pipe_builder = SourcePipeBuilder::create();
-            source_pipe_builder.add_source(output_port, sync_receiver_ck_source);
+        let output_port = OutputPort::create();
+        let sync_receiver_ck_source = SyncReceiverCkSource::create(
+            ctx.clone(),
+            ck_stream.input.into_inner(),
+            output_port.clone(),
+            sc,
+        )?;
+        let mut source_pipe_builder = SourcePipeBuilder::create();
+        source_pipe_builder.add_source(output_port, sync_receiver_ck_source);
 
-            let _ = interpreter
-                .set_source_pipe_builder(Option::from(source_pipe_builder))
-                .map_err(|e| tracing::error!("interpreter.set_source_pipe_builder.error: {:?}", e));
+        let _ = interpreter
+            .set_source_pipe_builder(Option::from(source_pipe_builder))
+            .map_err(|e| tracing::error!("interpreter.set_source_pipe_builder.error: {:?}", e));
 
-            let (mut tx, rx) = mpsc::channel(20);
-            tx.send(BlockItem::InsertSample(sample_block)).await.ok();
-
-            // the data is coming in async mode
-            let sent_all_data = ch_ctx.state.sent_all_data.clone();
-            let start = Instant::now();
-            ctx.try_spawn(async move {
-                interpreter.execute(None).await.unwrap();
-                sent_all_data.notify_one();
-            })?;
-            histogram!(
-                super::clickhouse_metrics::METRIC_INTERPRETER_USEDTIME,
-                start.elapsed(),
-                "interpreter" => name
-            );
-            return Ok(rx);
-        }
-
-        let (mut tx, rx) = mpsc::channel(20);
+        let (mut tx, rx) = mpsc::unbounded();
         tx.send(BlockItem::InsertSample(sample_block)).await.ok();
 
         // the data is coming in async mode
         let sent_all_data = ch_ctx.state.sent_all_data.clone();
         let start = Instant::now();
         ctx.try_spawn(async move {
-            interpreter
-                .execute(Some(Box::pin(ck_stream)))
-                .await
-                .unwrap();
+            interpreter.execute(None).await.unwrap();
             sent_all_data.notify_one();
         })?;
         histogram!(
@@ -167,13 +143,14 @@ impl InteractiveWorkerBase {
             start.elapsed(),
             "interpreter" => name
         );
+
         Ok(rx)
     }
 
     pub async fn process_select_query(
         plan: PlanNode,
         ctx: Arc<QueryContext>,
-    ) -> Result<Receiver<BlockItem>> {
+    ) -> Result<UnboundedReceiver<BlockItem>> {
         let start = Instant::now();
         let interpreter = InterpreterFactory::get(ctx.clone(), plan)?;
         let name = interpreter.name().to_string();
@@ -186,7 +163,7 @@ impl InteractiveWorkerBase {
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_clone = cancel.clone();
 
-        let (tx, rx) = mpsc::channel(20);
+        let (tx, rx) = mpsc::unbounded();
         let mut data_tx = tx.clone();
         let mut progress_tx = tx;
 

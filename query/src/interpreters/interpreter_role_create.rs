@@ -22,7 +22,6 @@ use common_streams::SendableDataBlockStream;
 use common_tracing::tracing;
 
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::sessions::QueryContext;
 
 #[derive(Debug)]
@@ -32,8 +31,8 @@ pub struct CreateRoleInterpreter {
 }
 
 impl CreateRoleInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, plan: CreateRolePlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(CreateRoleInterpreter { ctx, plan }))
+    pub fn try_create(ctx: Arc<QueryContext>, plan: CreateRolePlan) -> Result<Self> {
+        Ok(CreateRoleInterpreter { ctx, plan })
     }
 }
 
@@ -53,7 +52,9 @@ impl Interpreter for CreateRoleInterpreter {
         let tenant = self.ctx.get_tenant();
         let user_mgr = self.ctx.get_user_manager();
         let role_info = RoleInfo::new(&plan.role_name);
-        user_mgr.add_role(&tenant, role_info, false).await?;
+        user_mgr
+            .add_role(&tenant, role_info, plan.if_not_exists)
+            .await?;
 
         Ok(Box::pin(DataBlockStream::create(
             self.plan.schema(),

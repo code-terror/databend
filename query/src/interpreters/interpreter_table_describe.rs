@@ -23,7 +23,6 @@ use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
 
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::sessions::QueryContext;
 use crate::sql::PlanParser;
 use crate::storages::view::view_table::QUERY;
@@ -35,8 +34,8 @@ pub struct DescribeTableInterpreter {
 }
 
 impl DescribeTableInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, plan: DescribeTablePlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(DescribeTableInterpreter { ctx, plan }))
+    pub fn try_create(ctx: Arc<QueryContext>, plan: DescribeTablePlan) -> Result<Self> {
+        Ok(DescribeTableInterpreter { ctx, plan })
     }
 }
 
@@ -51,7 +50,7 @@ impl Interpreter for DescribeTableInterpreter {
         _input_stream: Option<SendableDataBlockStream>,
     ) -> Result<SendableDataBlockStream> {
         let catalog = self.plan.catalog.as_str();
-        let database = self.plan.db.as_str();
+        let database = self.plan.database.as_str();
         let table = self.plan.table.as_str();
         let table = self.ctx.get_table(catalog, database, table).await?;
         let tbl_info = table.get_table_info();

@@ -20,6 +20,7 @@ use std::sync::Arc;
 use common_arrow::arrow::array::Array;
 use common_arrow::arrow::bitmap::Bitmap;
 use common_arrow::arrow::buffer::Buffer;
+use common_io::prelude::BinaryWrite;
 pub use iterator::*;
 pub use mutable::*;
 
@@ -116,7 +117,7 @@ impl<T: ObjectType> Column for ObjectColumn<T> {
         self.values.len() * std::mem::size_of::<T>()
     }
 
-    fn as_arrow_array(&self) -> common_arrow::arrow::array::ArrayRef {
+    fn as_arrow_array(&self) -> common_arrow::ArrayRef {
         let mut offsets: Vec<i64> = Vec::with_capacity(self.values.len());
         let mut values: Vec<u8> = Vec::with_capacity(self.values.len());
 
@@ -129,10 +130,10 @@ impl<T: ObjectType> Column for ObjectColumn<T> {
             offsets.push(offset);
         }
 
-        Arc::new(LargeBinaryArray::from_data(
+        Box::new(LargeBinaryArray::from_data(
             self.data_type().arrow_type(),
-            Buffer::from_slice(offsets),
-            Buffer::from_slice(values),
+            Buffer::from(offsets),
+            Buffer::from(values),
             None,
         ))
     }
@@ -149,7 +150,7 @@ impl<T: ObjectType> Column for ObjectColumn<T> {
     }
 
     fn filter(&self, filter: &BooleanColumn) -> ColumnRef {
-        let length = filter.values().len() - filter.values().null_count();
+        let length = filter.values().len() - filter.values().unset_bits();
         if length == self.len() {
             return Arc::new(self.clone());
         }
@@ -215,6 +216,16 @@ impl<T: ObjectType> Column for ObjectColumn<T> {
     fn get(&self, index: usize) -> DataValue {
         self.values[index].clone().into()
     }
+
+    // TODO add buffer
+    // Bincode does not support the serde::Deserializer::deserialize_any method (while in processor thread 0).
+    // So we can't use bincode here
+    fn serialize(&self, vec: &mut Vec<u8>, row: usize) {
+        let mut buffer = Vec::with_capacity(8);
+        serde_json::to_writer(&mut buffer, &self.values[row]).unwrap();
+        BinaryWrite::write_uvarint(vec, buffer.len() as u64).unwrap();
+        vec.extend_from_slice(buffer.as_slice());
+    }
 }
 
 impl<T> ScalarColumn for ObjectColumn<T>
@@ -239,7 +250,12 @@ pub type VariantColumn = ObjectColumn<VariantValue>;
 
 impl<T: ObjectType> std::fmt::Debug for ObjectColumn<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // TODO(b41sh): implement display_fmt
-        write!(f, "ObjectColumn")
+        let mut data = Vec::with_capacity(self.len());
+        for idx in 0..self.len() {
+            data.push(format!("{}", self.get(idx)));
+        }
+        let head = T::column_name();
+        let iter = data.iter();
+        display_fmt(iter, head, self.len(), self.data_type_id(), f)
     }
 }

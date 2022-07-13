@@ -1,4 +1,10 @@
 statement ok
+use default;
+
+statement ok
+drop table if exists t all;
+
+statement ok
 SELECT max(number) FROM numbers_mt(0) GROUP BY number % 4;
 
 statement ok
@@ -28,18 +34,6 @@ SELECT number%3 as c1 FROM numbers_mt(10) where number > 2 group by number%3 ord
 0
 1
 2
-
-statement query IT 
-SELECT count(*), name FROM system.credits WHERE name='ahash' GROUP BY name;
-
-----  
-1 ahash
-
-statement query IT 
-SELECT count(1), name FROM system.credits WHERE name='ahash' GROUP BY name;
-
-----  
-1 ahash
 
 statement query T 
 SELECT '==GROUP BY Strings==';
@@ -71,7 +65,7 @@ statement query II
 SELECT a%3 as a1, count(1) as ct from t GROUP BY a1 ORDER BY a1,ct;
 
 ----  
-None 3
+NULL 3
 0 4
 2 3
 
@@ -79,7 +73,7 @@ statement query III
 SELECT a%2 as a1, a%3 as a2, count(0) as ct FROM t GROUP BY a1, a2 ORDER BY a1, a2;
 
 ----  
-None None 3
+NULL NULL 3
 0 0 2
 0 2 2
 1 0 2
@@ -89,7 +83,7 @@ statement query III
 SELECT a%2 as a1, to_uint64(c % 3) as c, count(0) as ct FROM t GROUP BY a1, c ORDER BY a1, c, ct;
 
 ----  
-None 2 3
+NULL 2 3
 0 0 2
 0 1 2
 1 0 1
@@ -99,7 +93,7 @@ statement query III
 SELECT to_uint64(c % 3) as c, a%2 as a1, count(0) as ct FROM t GROUP BY a1, c ORDER BY a1, c, ct;
 
 ----  
-2 None 3
+2 NULL 3
 0 0 2
 1 0 2
 0 1 1
@@ -115,6 +109,9 @@ SELECT '==GROUP BY DATETIMES==';
 ==GROUP BY DATETIMES==
 
 statement ok
+drop table if exists t_datetime;
+
+statement ok
 CREATE TABLE t_datetime(created_at Date, created_time DateTime, count Int32);
 
 statement ok
@@ -127,16 +124,12 @@ select created_at, sum(count) from t_datetime group by created_at order by creat
 2022-04-01 5
 2022-04-02 5
 
-statement query TI label(mysql,http)
+statement query TI
 select created_time, sum(count) from t_datetime group by created_time order by created_time;
 
-----  mysql
-2022-04-01 00:00:00 5
+----
+2022-04-01 00:00:00.000000 5
 2022-04-01 00:00:00.000001 5
-
-----  http
-2022-04-01 00:00:00 5
-2022-04-01 00:00:00 5
 
 statement ok
 drop table t_datetime;

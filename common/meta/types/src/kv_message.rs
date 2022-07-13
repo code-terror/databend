@@ -18,35 +18,35 @@ use crate::MatchSeq;
 use crate::Operation;
 use crate::SeqV;
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct GetKVReq {
     pub key: String,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct MGetKVReq {
     pub keys: Vec<String>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ListKVReq {
     pub prefix: String,
 }
 
-pub type UpsertKVActionReply = Change<Vec<u8>>;
-pub type GetKVActionReply = Option<SeqV<Vec<u8>>>;
-pub type MGetKVActionReply = Vec<Option<SeqV<Vec<u8>>>>;
-pub type PrefixListReply = Vec<(String, SeqV<Vec<u8>>)>;
+pub type UpsertKVReply = Change<Vec<u8>>;
+pub type GetKVReply = Option<SeqV<Vec<u8>>>;
+pub type MGetKVReply = Vec<Option<SeqV<Vec<u8>>>>;
+pub type ListKVReply = Vec<(String, SeqV<Vec<u8>>)>;
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
-pub struct UpsertKVAction {
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct UpsertKVReq {
     pub key: String,
     pub seq: MatchSeq,
     pub value: Operation<Vec<u8>>,
     pub value_meta: Option<KVMeta>,
 }
 
-impl UpsertKVAction {
+impl UpsertKVReq {
     pub fn new(
         key: &str,
         seq: MatchSeq,

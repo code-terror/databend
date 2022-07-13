@@ -15,9 +15,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use common_meta_types::TableIdent;
-use common_meta_types::TableInfo;
-use common_meta_types::TableMeta;
+use common_meta_app::schema::TableIdent;
+use common_meta_app::schema::TableInfo;
+use common_meta_app::schema::TableMeta;
 
 use crate::storages::view::view_table::QUERY;
 use crate::storages::view::ViewTable;
@@ -34,14 +34,7 @@ impl SchemataTable {
             NULL AS default_character_set_catalog,
             NULL AS default_character_set_schema,
             NULL AS default_character_set_name,
-            NULL AS sql_path,
-            name AS CATALOG_NAME,
-            name AS SCHEMA_NAME,
-            'default' AS SCHEMA_OWNER,
-            NULL AS DEFAULT_CHARACTER_SET_CATALOG,
-            NULL AS DEFAULT_CHARACTER_SET_SCHEMA,
-            NULL AS DEFAULT_CHARACTER_SET_NAME,
-            NULL AS SQL_PATH
+            NULL AS sql_path
         FROM system.databases;";
 
         let mut options = BTreeMap::new();

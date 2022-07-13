@@ -21,7 +21,8 @@ use common_datavalues::DataSchemaRef;
 use common_datavalues::DataSchemaRefExt;
 use common_exception::ErrorCode;
 use common_exception::Result;
-use common_meta_types::TableMeta;
+use common_meta_app::schema::TableMeta;
+use common_planners::validate_clustering;
 use common_planners::validate_expression;
 use common_planners::CreateTablePlan;
 use common_planners::PlanNode;
@@ -43,14 +44,14 @@ use crate::sql::PlanParser;
 use crate::sql::SQLCommon;
 use crate::sql::OPT_KEY_DATABASE_ID;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DfCreateTable {
     pub if_not_exists: bool,
     /// Table name
     pub name: ObjectName,
     pub columns: Vec<ColumnDef>,
     pub engine: String,
-    pub order_keys: Vec<Expr>,
+    pub cluster_keys: Vec<Expr>,
     pub options: BTreeMap<String, String>,
 
     // The table name after "create .. like" statement.
@@ -64,9 +65,9 @@ pub struct DfCreateTable {
 impl AnalyzableStatement for DfCreateTable {
     #[tracing::instrument(level = "debug", skip(self, ctx), fields(ctx.id = ctx.get_id().as_str()))]
     async fn analyze(&self, ctx: Arc<QueryContext>) -> Result<AnalyzedResult> {
-        let (catalog, db, table) = resolve_table(&ctx, &self.name, "CREATE TABLE")?;
+        let (catalog, database, table) = resolve_table(&ctx, &self.name, "CREATE TABLE")?;
         let mut table_meta = self
-            .table_meta(ctx.clone(), catalog.as_str(), db.as_str())
+            .table_meta(ctx.clone(), catalog.as_str(), database.as_str())
             .await?;
         let if_not_exists = self.if_not_exists;
         let tenant = ctx.get_tenant();
@@ -96,17 +97,17 @@ impl AnalyzableStatement for DfCreateTable {
             None => None,
         };
 
-        let mut order_keys = vec![];
-        for k in self.order_keys.iter() {
+        let mut cluster_keys = vec![];
+        for k in self.cluster_keys.iter() {
             let expr = expression_analyzer.analyze_sync(k)?;
             validate_expression(&expr, &table_meta.schema)?;
-            order_keys.push(expr);
+            validate_clustering(&expr)?;
+            cluster_keys.push(expr.column_name());
         }
 
-        if !order_keys.is_empty() {
-            let order_keys: Vec<String> = order_keys.iter().map(|e| e.column_name()).collect();
-            let order_keys_sql = format!("({})", order_keys.join(", "));
-            table_meta.order_keys = Some(order_keys_sql);
+        if !cluster_keys.is_empty() {
+            let cluster_keys_str = format!("({})", cluster_keys.join(", "));
+            table_meta = table_meta.push_cluster_key(cluster_keys_str);
         }
 
         Ok(AnalyzedResult::SimpleQuery(Box::new(
@@ -114,10 +115,10 @@ impl AnalyzableStatement for DfCreateTable {
                 if_not_exists,
                 tenant,
                 catalog,
-                db,
+                database,
                 table,
                 table_meta,
-                order_keys,
+                cluster_keys: self.cluster_keys.iter().map(ToString::to_string).collect(),
                 as_select: as_select_plan_node,
             }),
         )))

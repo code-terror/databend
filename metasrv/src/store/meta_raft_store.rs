@@ -80,7 +80,7 @@ pub struct MetaRaftStore {
     /// state machine is stored in another sled db since it contains user data and needs to be export/import as a whole.
     /// This db is also used to generate a locally unique id.
     /// Currently the id is used to create a unique snapshot id.
-    _db: sled::Db,
+    pub(crate) db: sled::Db,
 
     // Raft state includes:
     // id: NodeId,
@@ -147,7 +147,7 @@ impl MetaRaftStore {
             id: raft_state.id,
             config: config.clone(),
             is_opened: is_open,
-            _db: db,
+            db,
             raft_state,
             log,
             state_machine: sm,
@@ -453,7 +453,7 @@ impl RaftStorage<LogEntry, AppliedState> for MetaRaftStore {
     async fn get_current_snapshot(
         &self,
     ) -> Result<Option<openraft::storage::Snapshot<Self::SnapshotData>>, StorageError> {
-        tracing::info!("got snapshot start");
+        tracing::info!("get snapshot start");
         let snap = match &*self.current_snapshot.read().await {
             Some(snapshot) => {
                 let data = snapshot.data.clone();
@@ -465,7 +465,7 @@ impl RaftStorage<LogEntry, AppliedState> for MetaRaftStore {
             None => Ok(None),
         };
 
-        tracing::info!("got snapshot complete");
+        tracing::info!("get snapshot complete");
 
         snap
     }

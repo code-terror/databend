@@ -16,14 +16,18 @@ use std::any::Any;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use chrono::DateTime;
+use chrono::Utc;
 use common_datablocks::DataBlock;
 use common_datavalues::DataSchemaRef;
 use common_exception::ErrorCode;
 use common_exception::Result;
+use common_meta_app::schema::TableInfo;
 use common_meta_types::MetaId;
-use common_meta_types::TableInfo;
+use common_planners::DeletePlan;
 use common_planners::Expression;
 use common_planners::Extras;
+use common_planners::OptimizeTablePlan;
 use common_planners::Partitions;
 use common_planners::ReadDataSourcePlan;
 use common_planners::Statistics;
@@ -51,6 +55,10 @@ pub trait Table: Sync + Send {
         self.get_table_info().options()
     }
 
+    fn field_comments(&self) -> &Vec<String> {
+        self.get_table_info().field_comments()
+    }
+
     fn get_id(&self) -> MetaId {
         self.get_table_info().ident.table_id
     }
@@ -73,6 +81,33 @@ pub trait Table: Sync + Send {
         false
     }
 
+    fn cluster_keys(&self) -> Vec<Expression> {
+        vec![]
+    }
+
+    async fn alter_table_cluster_keys(
+        &self,
+        _ctx: Arc<QueryContext>,
+        _catalog_name: &str,
+        _cluster_key_str: String,
+    ) -> Result<()> {
+        Err(ErrorCode::UnsupportedEngineParams(format!(
+            "Unsupported clustering keys for engine: {}",
+            self.engine()
+        )))
+    }
+
+    async fn drop_table_cluster_keys(
+        &self,
+        _ctx: Arc<QueryContext>,
+        _catalog_name: &str,
+    ) -> Result<()> {
+        Err(ErrorCode::UnsupportedEngineParams(format!(
+            "Unsupported clustering keys for engine: {}",
+            self.engine()
+        )))
+    }
+
     // defaults to generate one single part and empty statistics
     async fn read_partitions(
         &self,
@@ -86,14 +121,14 @@ pub trait Table: Sync + Send {
         None
     }
 
-    // Read block data from the underling.
-    async fn read(
-        &self,
-        _ctx: Arc<QueryContext>,
-        _plan: &ReadDataSourcePlan,
-    ) -> Result<SendableDataBlockStream> {
-        unimplemented!()
-    }
+    // // Read block data from the underling.
+    // async fn read(
+    //     &self,
+    //     _ctx: Arc<QueryContext>,
+    //     _plan: &ReadDataSourcePlan,
+    // ) -> Result<SendableDataBlockStream> {
+    //     unimplemented!()
+    // }
 
     fn read2(
         &self,
@@ -148,8 +183,43 @@ pub trait Table: Sync + Send {
     async fn statistics(&self, _ctx: Arc<QueryContext>) -> Result<Option<TableStatistics>> {
         Ok(None)
     }
+
+    async fn navigate_to(
+        &self,
+        _ctx: Arc<QueryContext>,
+        _instant: &NavigationPoint,
+    ) -> Result<Arc<dyn Table>> {
+        Err(ErrorCode::UnImplement(format!(
+            "table {},  of engine type {}, does not support time travel",
+            self.name(),
+            self.get_table_info().engine(),
+        )))
+    }
+
+    async fn delete(&self, _ctx: Arc<QueryContext>, _delete_plan: DeletePlan) -> Result<()> {
+        Err(ErrorCode::UnImplement(format!(
+            "table {},  of engine type {}, does not support DELETE FROM",
+            self.name(),
+            self.get_table_info().engine(),
+        )))
+    }
+
+    async fn compact(&self, _ctx: Arc<QueryContext>, _plan: OptimizeTablePlan) -> Result<()> {
+        Err(ErrorCode::UnImplement(format!(
+            "table {},  of engine type {}, does not support compact",
+            self.name(),
+            self.get_table_info().engine(),
+        )))
+    }
 }
 
+#[derive(Debug)]
+pub enum NavigationPoint {
+    SnapshotID(String),
+    TimePoint(DateTime<Utc>),
+}
+
+#[derive(Debug)]
 pub struct TableStatistics {
     pub num_rows: Option<u64>,
     pub data_size: Option<u64>,

@@ -14,7 +14,7 @@ statement query T
 select get(parse_json('[2.71, 3.14]'), 2);
 
 ----  
-None
+NULL
 
 statement query T 
 select get(parse_json('{"aa":1, "aA":2, "Aa":3}'), 'aA');
@@ -26,7 +26,7 @@ statement query T
 select get(parse_json('{"aa":1, "aA":2, "Aa":3}'), 'AA');
 
 ----  
-None
+NULL
 
 statement query T 
 select '==get_ignore_case==';
@@ -34,12 +34,14 @@ select '==get_ignore_case==';
 ----  
 ==get_ignore_case==
 
+skipif clickhouse
 statement query T 
 select get_ignore_case(parse_json('{"aa":1, "aA":2, "Aa":3}'), 'aA');
 
 ----  
 2
 
+skipif clickhouse
 statement query T 
 select get_ignore_case(parse_json('{"aa":1, "aA":2, "Aa":3}'), 'AA');
 
@@ -52,47 +54,44 @@ select '==get_path==';
 ----  
 ==get_path==
 
+skipif clickhouse
 statement query T 
 select get_path(parse_json('{"attr":[{"name":1}, {"name":2}]}'), 'attr[0].name');
 
 ----  
 1
 
+skipif clickhouse
 statement query T 
 select get_path(parse_json('{"attr":[{"name":1}, {"name":2}]}'), 'attr[1]:name');
 
 ----  
 2
 
+skipif clickhouse
 statement query T 
 select get_path(parse_json('{"customer":{"id":1, "name":"databend", "extras":["ext", "test"]}}'), 'customer:id');
 
 ----  
 1
 
-statement query T label(mysql,http)
+statement query T
 select get_path(parse_json('{"customer":{"id":1, "name":"databend", "extras":["ext", "test"]}}'), 'customer.name');
 
-----  mysql
+----
 "databend"
 
-----  http
-databend
-
-statement query T label(mysql,http)
+statement query T
 select get_path(parse_json('{"customer":{"id":1, "name":"databend", "extras":["ext", "test"]}}'), 'customer["extras"][0]');
 
-----  mysql
+----
 "ext"
 
-----  http
-ext
-
-statement query T 
+statement query T
 select get_path(parse_json('{"customer":{"id":1, "name":"databend", "extras":["ext", "test"]}}'), 'customer["extras"][2]');
 
 ----  
-None
+NULL
 
 statement error 1005
 select get_path(parse_json('{"customer":{"id":1, "name":"databend", "extras":["ext", "test"]}}'), ''); 
@@ -137,7 +136,7 @@ statement query T
 select json_extract_path_text('{"customer":{"id":1, "name":"databend", "extras":["ext", "test"]}}', 'customer["extras"][2]');
 
 ----  
-None
+NULL
 
 statement error 1005
 select json_extract_path_text('{"customer":{"id":1, "name":"databend", "extras":["ext", "test"]}}', ''); 
@@ -152,25 +151,25 @@ statement ok
 USE db1;
 
 statement ok
-CREATE TABLE IF NOT EXISTS t1(id Int null, arr Array null) Engine = Memory;
+CREATE TABLE IF NOT EXISTS t1(id Int null, arr Array null) Engine = Fuse;
 
 statement ok
 insert into t1 select 1, parse_json('[1,2,3,["a","b","c"]]');
 
 statement ok
-CREATE TABLE IF NOT EXISTS t2(id Int null, obj Object null) Engine = Memory;
+CREATE TABLE IF NOT EXISTS t2(id Int null, obj Object null) Engine = Fuse;
 
 statement ok
 insert into t2 select 1, parse_json('{"a":1,"b":{"c":2}}');
 
 statement ok
-CREATE TABLE IF NOT EXISTS t3(id Int null, str String null) Engine = Memory;
+CREATE TABLE IF NOT EXISTS t3(id Int null, str String null) Engine = Fuse;
 
 statement ok
 insert into t3 values(1, '[1,2,3,["a","b","c"]]'), (2, '{"a":1,"b":{"c":2}}');
 
 statement ok
-CREATE TABLE IF NOT EXISTS t4(id Int null, arr Array(Int64) null) Engine = Memory;
+CREATE TABLE IF NOT EXISTS t4(id Int null, arr Array(Int64) null) Engine = Fuse;
 
 statement ok
 insert into t4 values(1, [10,20,30,40]), (2, [50,60,70,80]);

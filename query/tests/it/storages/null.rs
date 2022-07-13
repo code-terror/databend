@@ -17,10 +17,11 @@ use common_base::base::tokio;
 use common_datablocks::DataBlock;
 use common_datavalues::prelude::*;
 use common_exception::Result;
-use common_meta_types::TableInfo;
-use common_meta_types::TableMeta;
+use common_meta_app::schema::TableInfo;
+use common_meta_app::schema::TableMeta;
 use common_planners::*;
 use databend_query::storages::null::NullTable;
+use databend_query::storages::TableStreamReadWrap;
 use databend_query::storages::ToReadDataSourcePlan;
 use futures::TryStreamExt;
 
@@ -75,7 +76,7 @@ async fn test_null_table() -> Result<()> {
     {
         let truncate_plan = TruncateTablePlan {
             catalog: "default".to_string(),
-            db: "default".to_string(),
+            database: "default".to_string(),
             table: "a".to_string(),
             purge: false,
         };

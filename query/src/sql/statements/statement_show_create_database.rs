@@ -24,7 +24,7 @@ use crate::sessions::QueryContext;
 use crate::sql::statements::AnalyzableStatement;
 use crate::sql::statements::AnalyzedResult;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DfShowCreateDatabase {
     pub name: ObjectName,
 }
@@ -36,7 +36,7 @@ impl AnalyzableStatement for DfShowCreateDatabase {
         Ok(AnalyzedResult::SimpleQuery(Box::new(
             PlanNode::ShowCreateDatabase(ShowCreateDatabasePlan {
                 catalog,
-                db,
+                database: db,
                 schema: Self::schema(),
             }),
         )))
