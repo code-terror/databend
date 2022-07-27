@@ -1,17 +1,20 @@
 set timezone = 'UTC';
 SELECT today() >= 18869;
 SELECT now() >= 1630295616;
-select  to_datetime(1630320462000000), to_int64(to_datetime(1630320462000000))  = 1630320462000000;
-select  to_date(18869), to_uint32(to_date(18869))  = 18869;
-select  to_datetime(1640019661000000), to_int64(to_datetime(1640019661000000))  = 1640019661000000;
-select  to_date('1000-01-01');
-select  to_date('9999-12-31');
-select  to_date('10000-12-31'); -- {ErrorCode 1010}
-select  to_date('0999-12-31'); -- {ErrorCode 1068}
-select  to_datetime('1000-01-01 00:00:00');
-select  to_datetime('9999-12-31 23:59:59');
-select  to_datetime('10000-01-01 00:00:00'); -- {ErrorCode 1010}
-select  to_datetime('0999-12-31 23:59:59'); -- {ErrorCode 1069}
+select to_datetime(1630833797), to_int64(to_datetime(1630833797)) = 1630833797000000;
+select to_datetime(1630833797123), to_int64(to_datetime(1630833797123)) = 1630833797123000;
+select to_datetime(1630833797123456), to_int64(to_datetime(1630833797123456)) = 1630833797123456;
+select to_datetime(1630320462000000), to_int64(to_datetime(1630320462000000))  = 1630320462000000;
+select to_date(18869), to_uint32(to_date(18869))  = 18869;
+select to_datetime(1640019661000000), to_int64(to_datetime(1640019661000000))  = 1640019661000000;
+select to_date('1000-01-01');
+select to_date('9999-12-31');
+select to_date('10000-12-31'); -- {ErrorCode 1010}
+select to_date('0999-12-31'); -- {ErrorCode 1068}
+select to_datetime('1000-01-01 00:00:00');
+select to_datetime('9999-12-31 23:59:59');
+select to_datetime('10000-01-01 00:00:00'); -- {ErrorCode 1010}
+select to_datetime('0999-12-31 23:59:59'); -- {ErrorCode 1069}
 
 select typeof(today() + 3) = 'DATE';
 select typeof(today() - 3) = 'DATE';
@@ -232,8 +235,9 @@ insert into t values('2022-04-02 15:10:28.221', '2022-04-02 15:10:28.221', '1000
 select * from t order by b;
 drop table t;
 
--- select '===date_add===';
 -- set enable_planner_v2=1;
+
+-- select '===date_add===';
 -- select date_add(to_date(18321), 1, YEAR);
 -- select date_add(to_date(18321), -1, YEAR);
 -- select date_add(to_date(18321), 1, SECOND);
@@ -241,6 +245,16 @@ drop table t;
 -- create table t(a int);
 -- insert into t values(1), (2);
 -- select date_add(to_date(18321), a, YEAR) from t;
+-- drop table t;
+
+-- select '===date_sub===';
+-- select date_sub(to_date(18321), 1, YEAR);
+-- select date_sub(to_date(18321), -1, YEAR);
+-- select date_sub(to_date(18321), 1, SECOND);
+
+-- create table t(a int);
+-- insert into t values(1), (2);
+-- select date_sub(to_date(18321), a, YEAR) from t;
 -- drop table t;
 
 -- set enable_planner_v2=0;

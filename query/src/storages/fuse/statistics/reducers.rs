@@ -14,41 +14,39 @@
 //
 
 use std::borrow::Borrow;
-use std::cmp::Ordering;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use common_datavalues::DataValue;
 use common_exception::Result;
 
+use crate::storages::fuse::meta::BlockMeta;
 use crate::storages::fuse::meta::ColumnId;
 use crate::storages::fuse::meta::Statistics;
-use crate::storages::index::ClusterStatistics;
 use crate::storages::index::ColumnStatistics;
-use crate::storages::index::ColumnsStatistics;
+use crate::storages::index::StatisticsOfColumns;
 
-pub fn reduce_block_stats<T: Borrow<ColumnsStatistics>>(stats: &[T]) -> Result<ColumnsStatistics> {
-    let len = stats.len();
-
-    // transpose Vec<HashMap<_,(_,_)>> to HashMap<_, (_, Vec<_>)>
+pub fn reduce_block_statistics<T: Borrow<StatisticsOfColumns>>(
+    stats: &[T],
+) -> Result<StatisticsOfColumns> {
+    // Combine statistics of a column into `Vec`, that is:
+    // from : `&[HashMap<ColumnId, ColumnStatistics>]`
+    // to   : `HashMap<ColumnId, Vec<&ColumnStatistics>)>`
     let col_stat_list = stats.iter().fold(HashMap::new(), |acc, item| {
         item.borrow().iter().fold(
             acc,
             |mut acc: HashMap<ColumnId, Vec<&ColumnStatistics>>, (col_id, stats)| {
-                let entry = acc.entry(*col_id);
-                match entry {
-                    Entry::Occupied(_) => {
-                        entry.and_modify(|v| v.push(stats));
-                    }
-                    Entry::Vacant(_) => {
-                        entry.or_insert_with(|| vec![stats]);
-                    }
-                }
+                acc.entry(*col_id)
+                    .or_insert_with(|| vec![stats])
+                    .push(stats);
                 acc
             },
         )
     });
 
+    // Reduce the `Vec<&ColumnStatistics` into ColumnStatistics`, i.e.:
+    // from : `HashMap<ColumnId, Vec<&ColumnStatistics>)>`
+    // to   : `type BlockStatistics = HashMap<ColumnId, ColumnStatistics>`
+    let len = stats.len();
     col_stat_list
         .iter()
         .try_fold(HashMap::with_capacity(len), |mut acc, (id, stats)| {
@@ -58,8 +56,6 @@ pub fn reduce_block_stats<T: Borrow<ColumnsStatistics>>(stats: &[T]) -> Result<C
             let mut in_memory_size = 0;
 
             for col_stats in stats {
-                // to be optimized, with DataType and the value of data, we may
-                // able to compare the min/max here
                 min_stats.push(col_stats.min.clone());
                 max_stats.push(col_stats.max.clone());
 
@@ -67,9 +63,15 @@ pub fn reduce_block_stats<T: Borrow<ColumnsStatistics>>(stats: &[T]) -> Result<C
                 in_memory_size += col_stats.in_memory_size;
             }
 
-            // TODO
+            // TODO:
+
             // for some data types, we shall balance the accuracy and the length
             // e.g. for a string col, which max value is "abcdef....", we record the max as something like "b"
+
+            // In accumulator.rs, we use aggregation functions to get the min/max of `DataValue`s,
+            // like this:
+            //   `let maxs = eval_aggr("max", vec![], &[column_field], rows)?`
+            // we should unify these logics, or at least, ensure the ways they compares do NOT diverge
             let min = min_stats
                 .iter()
                 .filter(|s| !s.is_null())
@@ -94,65 +96,50 @@ pub fn reduce_block_stats<T: Borrow<ColumnsStatistics>>(stats: &[T]) -> Result<C
         })
 }
 
-pub fn reduce_cluster_stats<T: Borrow<Option<ClusterStatistics>>>(
-    stats: &[T],
-) -> Option<ClusterStatistics> {
-    if stats.iter().any(|s| s.borrow().is_none()) {
-        return None;
-    }
-
-    let stat = stats[0].borrow().clone().unwrap();
-    let mut min = stat.min.clone();
-    let mut max = stat.max;
-    for stat in stats.iter().skip(1) {
-        let stat = stat.borrow().clone().unwrap();
-        for (l, r) in min.iter().zip(stat.min.iter()) {
-            match (l.is_null(), r.is_null()) {
-                (true, _) => {
-                    min = stat.min.clone();
-                    break;
-                }
-                (_, true) => break,
-                _ => match l.cmp(r) {
-                    Ordering::Equal => continue,
-                    Ordering::Less => break,
-                    Ordering::Greater => {
-                        min = stat.min.clone();
-                        break;
-                    }
-                },
-            }
-        }
-
-        for (l, r) in max.iter().zip(stat.max.iter()) {
-            match (l.is_null(), r.is_null()) {
-                (true, _) => {
-                    max = stat.max.clone();
-                    break;
-                }
-                (_, true) => break,
-                _ => match l.cmp(r) {
-                    Ordering::Equal => continue,
-                    Ordering::Less => {
-                        max = stat.max.clone();
-                        break;
-                    }
-                    Ordering::Greater => break,
-                },
-            }
-        }
-    }
-    Some(ClusterStatistics { min, max })
-}
-
 pub fn merge_statistics(l: &Statistics, r: &Statistics) -> Result<Statistics> {
     let s = Statistics {
         row_count: l.row_count + r.row_count,
         block_count: l.block_count + r.block_count,
         uncompressed_byte_size: l.uncompressed_byte_size + r.uncompressed_byte_size,
         compressed_byte_size: l.compressed_byte_size + r.compressed_byte_size,
-        col_stats: reduce_block_stats(&[&l.col_stats, &r.col_stats])?,
-        cluster_stats: reduce_cluster_stats(&[&l.cluster_stats, &r.cluster_stats]),
+        col_stats: reduce_block_statistics(&[&l.col_stats, &r.col_stats])?,
     };
     Ok(s)
+}
+
+pub fn reduce_statistics<T: Borrow<Statistics>>(stats: &[T]) -> Result<Statistics> {
+    let mut statistics = Statistics::default();
+    for item in stats {
+        statistics = merge_statistics(&statistics, item.borrow())?
+    }
+    Ok(statistics)
+}
+
+pub fn reduce_block_metas<T: Borrow<BlockMeta>>(block_metas: &[T]) -> Result<Statistics> {
+    let mut row_count: u64 = 0;
+    let mut block_count: u64 = 0;
+    let mut uncompressed_byte_size: u64 = 0;
+    let mut compressed_byte_size: u64 = 0;
+
+    block_metas.iter().for_each(|b| {
+        let b = b.borrow();
+        row_count += b.row_count;
+        block_count += 1;
+        uncompressed_byte_size += b.block_size;
+        compressed_byte_size += b.file_size;
+    });
+
+    let stats = block_metas
+        .iter()
+        .map(|v| &v.borrow().col_stats)
+        .collect::<Vec<_>>();
+    let merged_col_stats = reduce_block_statistics(&stats)?;
+
+    Ok(Statistics {
+        row_count,
+        block_count,
+        uncompressed_byte_size,
+        compressed_byte_size,
+        col_stats: merged_col_stats,
+    })
 }

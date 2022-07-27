@@ -23,21 +23,25 @@ use std::time::Duration;
 use common_base::base::tokio;
 use common_base::base::Runtime;
 use common_base::base::SignalStream;
-use common_base::infallible::RwLock;
 use common_contexts::DalRuntime;
 use common_exception::ErrorCode;
 use common_exception::Result;
-use common_io::prelude::init_operator;
 use common_metrics::label_counter;
+use common_storage::init_operator;
 use common_tracing::init_query_logger;
 use common_tracing::tracing;
 use common_tracing::tracing_appender::non_blocking::WorkerGuard;
+use common_users::RoleCacheMgr;
+use common_users::UserApiProvider;
 use futures::future::Either;
 use futures::StreamExt;
 use opendal::Operator;
+use parking_lot::RwLock;
 
+use crate::api::DataExchangeManager;
 use crate::catalogs::CatalogManager;
 use crate::clusters::ClusterDiscovery;
+use crate::interpreters::AsyncInsertQueue;
 use crate::servers::http::v1::HttpQueryManager;
 use crate::sessions::session::Session;
 use crate::sessions::session_ref::SessionRef;
@@ -52,6 +56,7 @@ pub struct SessionManager {
     pub(in crate::sessions) discovery: RwLock<Arc<ClusterDiscovery>>,
     pub(in crate::sessions) catalogs: RwLock<Arc<CatalogManager>>,
     pub(in crate::sessions) http_query_manager: Arc<HttpQueryManager>,
+    pub(in crate::sessions) data_exchange_manager: Arc<DataExchangeManager>,
 
     pub(in crate::sessions) max_sessions: usize,
     pub(in crate::sessions) active_sessions: Arc<RwLock<HashMap<String, Arc<Session>>>>,
@@ -62,9 +67,13 @@ pub struct SessionManager {
     storage_operator: RwLock<Operator>,
     storage_runtime: Arc<Runtime>,
     _guards: Vec<WorkerGuard>,
+
+    user_api_provider: RwLock<Arc<UserApiProvider>>,
+    role_cache_manager: RwLock<Arc<RoleCacheMgr>>,
     // When typ is MySQL, insert into this map, key is id, val is MySQL connection id.
     pub(crate) mysql_conn_map: Arc<RwLock<HashMap<Option<u32>, String>>>,
     pub(in crate::sessions) mysql_basic_conn_id: AtomicU32,
+    async_insert_queue: Arc<RwLock<Option<Arc<AsyncInsertQueue>>>>,
 }
 
 impl SessionManager {
@@ -80,6 +89,7 @@ impl SessionManager {
             if storage_num_cpus == 0 {
                 storage_num_cpus = std::cmp::max(1, num_cpus::get() / 2)
             }
+
             Runtime::with_worker_threads(storage_num_cpus, Some("IO-worker".to_owned()))?
         };
 
@@ -88,6 +98,7 @@ impl SessionManager {
         let storage_operator = Self::init_storage_operator(&conf)
             .await?
             .layer(DalRuntime::new(storage_runtime.inner()));
+
         let http_query_manager = HttpQueryManager::create_global(conf.clone()).await?;
         let max_sessions = conf.query.max_active_sessions as usize;
         let active_sessions = Arc::new(RwLock::new(HashMap::with_capacity(max_sessions)));
@@ -100,6 +111,21 @@ impl SessionManager {
             (Vec::new(), None)
         };
         let mysql_conn_map = Arc::new(RwLock::new(HashMap::with_capacity(max_sessions)));
+        let user_api_provider =
+            UserApiProvider::create_global(conf.meta.to_meta_grpc_client_conf()).await?;
+        let role_cache_manager = Arc::new(RoleCacheMgr::new(user_api_provider.clone()));
+
+        let exchange_manager = DataExchangeManager::create(conf.clone());
+        let storage_runtime = Arc::new(storage_runtime);
+
+        let async_insert_queue =
+            Arc::new(RwLock::new(Some(Arc::new(AsyncInsertQueue::try_create(
+                Arc::new(RwLock::new(None)),
+                storage_runtime.clone(),
+                conf.clone().query.async_insert_max_data_size,
+                Duration::from_millis(conf.query.async_insert_busy_timeout),
+                Duration::from_millis(conf.query.async_insert_stale_timeout),
+            )))));
 
         Ok(Arc::new(SessionManager {
             conf: RwLock::new(conf),
@@ -108,14 +134,18 @@ impl SessionManager {
             http_query_manager,
             max_sessions,
             active_sessions,
+            data_exchange_manager: exchange_manager,
             storage_cache_manager: RwLock::new(storage_cache_manager),
             query_logger: RwLock::new(query_logger),
             status,
             storage_operator: RwLock::new(storage_operator),
-            storage_runtime: Arc::new(storage_runtime),
+            storage_runtime,
             _guards,
+            user_api_provider: RwLock::new(user_api_provider),
+            role_cache_manager: RwLock::new(role_cache_manager),
             mysql_conn_map,
             mysql_basic_conn_id: AtomicU32::new(9_u32.to_le() as u32),
+            async_insert_queue,
         }))
     }
 
@@ -143,8 +173,20 @@ impl SessionManager {
         self.storage_cache_manager.read().clone()
     }
 
+    pub fn get_data_exchange_manager(&self) -> Arc<DataExchangeManager> {
+        self.data_exchange_manager.clone()
+    }
+
     pub fn get_storage_runtime(&self) -> Arc<Runtime> {
         self.storage_runtime.clone()
+    }
+
+    pub fn get_user_api_provider(&self) -> Arc<UserApiProvider> {
+        self.user_api_provider.read().clone()
+    }
+
+    pub fn get_role_cache_manager(&self) -> Arc<RoleCacheMgr> {
+        self.role_cache_manager.read().clone()
     }
 
     pub async fn create_session(self: &Arc<Self>, typ: SessionType) -> Result<SessionRef> {
@@ -271,8 +313,12 @@ impl SessionManager {
             &config.query.cluster_id,
         );
 
-        let mut sessions = self.active_sessions.write();
-        sessions.remove(session_id);
+        // stop tracking session
+        {
+            let mut sessions = self.active_sessions.write();
+            sessions.remove(session_id);
+        }
+
         //also need remove mysql_conn_map
         let mut mysql_conns_map = self.mysql_conn_map.write();
         for (k, v) in mysql_conns_map.deref_mut().clone() {
@@ -325,7 +371,7 @@ impl SessionManager {
 
     async fn destroy_idle_sessions(sessions: &Arc<RwLock<HashMap<String, Arc<Session>>>>) -> bool {
         // Read lock does not support reentrant
-        // https://github.com/Amanieu/parking_lot/blob/lock_api-0.4.4/lock_api/src/rwlock.rs#L422
+        // https://github.com/Amanieu/parking_lot::/blob/lock_api-0.4.4/lock_api/src/rwlock.rs#L422
         let active_sessions_read_guard = sessions.read();
 
         // First try to kill the idle session
@@ -343,13 +389,24 @@ impl SessionManager {
 
     // Init the storage operator by config.
     async fn init_storage_operator(conf: &Config) -> Result<Operator> {
-        let op = init_operator(&conf.storage).await?;
-
+        let op = init_operator(&conf.storage.params).await?;
         // Enable exponential backoff by default
-        Ok(op.with_backoff(backon::ExponentialBackoff::default()))
+        let op = op.with_backoff(backon::ExponentialBackoff::default());
+        // OpenDAL will send a real request to underlying storage to check whether it works or not.
+        // If this check failed, it's highly possible that the users have configured it wrongly.
+        op.check().await.map_err(|e| {
+            ErrorCode::StorageUnavailable(format!(
+                "current configured storage is not available: {e}"
+            ))
+        })?;
+
+        Ok(op)
     }
 
     pub async fn reload_config(&self) -> Result<()> {
+        // TODO(xp): Potential race condition if fields are updated one by one.
+        //           These fields should all be got prepared then update in one atomic update.
+
         let config = {
             let mut config = self.conf.write();
             let config_file = config.config_file.clone();
@@ -379,10 +436,22 @@ impl SessionManager {
             *self.discovery.write() = discovery;
         }
 
+        {
+            let x = UserApiProvider::create_global(config.meta.to_meta_grpc_client_conf()).await?;
+            *self.user_api_provider.write() = x.clone();
+
+            let role_cache_manager = RoleCacheMgr::new(x);
+            *self.role_cache_manager.write() = Arc::new(role_cache_manager);
+        }
+
         Ok(())
     }
 
     pub fn get_query_logger(&self) -> Option<Arc<dyn tracing::Subscriber + Send + Sync>> {
         self.query_logger.write().to_owned()
+    }
+
+    pub fn get_async_insert_queue(&self) -> Arc<RwLock<Option<Arc<AsyncInsertQueue>>>> {
+        self.async_insert_queue.clone()
     }
 }

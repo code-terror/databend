@@ -11,12 +11,13 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 mod api;
+mod auth;
 mod catalogs;
 mod clusters;
 mod common;
 mod configs;
-mod formats;
 mod functions;
 mod interpreters;
 mod metrics;
@@ -28,5 +29,4 @@ mod sql;
 mod storages;
 mod table_functions;
 mod tests;
-mod users;
 mod version;

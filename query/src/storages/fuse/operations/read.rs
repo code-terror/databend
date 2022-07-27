@@ -13,6 +13,7 @@
 //  limitations under the License.
 //
 
+use std::any::Any;
 use std::sync::Arc;
 
 use common_base::base::Progress;
@@ -23,9 +24,6 @@ use common_exception::Result;
 use common_planners::Extras;
 use common_planners::PartInfoPtr;
 use common_planners::ReadDataSourcePlan;
-use common_streams::SendableDataBlockStream;
-use common_tracing::tracing_futures::Instrument;
-use futures::StreamExt;
 
 use crate::pipelines::new::processors::port::OutputPort;
 use crate::pipelines::new::processors::processor::Event;
@@ -39,39 +37,18 @@ use crate::storages::fuse::operations::read::State::Generated;
 use crate::storages::fuse::FuseTable;
 
 impl FuseTable {
-    #[inline]
-    pub async fn do_read(
-        &self,
-        ctx: Arc<QueryContext>,
-        push_downs: &Option<Extras>,
-    ) -> Result<SendableDataBlockStream> {
-        let block_reader = self.create_block_reader(&ctx, push_downs)?;
-
-        let iter = std::iter::from_fn(move || match ctx.clone().try_get_partitions(1) {
-            Err(_) => None,
-            Ok(parts) if parts.is_empty() => None,
-            Ok(parts) => Some(parts),
-        })
-        .flatten();
-
-        let part_stream = futures::stream::iter(iter);
-
-        let stream = part_stream
-            .then(move |part| {
-                let block_reader = block_reader.clone();
-                async move { block_reader.read(part).await }
-            })
-            .instrument(common_tracing::tracing::Span::current());
-
-        Ok(Box::pin(stream))
-    }
-
-    fn create_block_reader(
+    pub fn create_block_reader(
         &self,
         ctx: &Arc<QueryContext>,
-        push_downs: &Option<Extras>,
+        projection: Vec<usize>,
     ) -> Result<Arc<BlockReader>> {
-        let projection = if let Some(Extras {
+        let operator = ctx.get_storage_operator()?;
+        let table_schema = self.table_info.schema();
+        BlockReader::create(operator, table_schema, projection)
+    }
+
+    pub fn projection_of_push_downs(&self, push_downs: &Option<Extras>) -> Vec<usize> {
+        if let Some(Extras {
             projection: Some(prj),
             ..
         }) = push_downs
@@ -81,11 +58,7 @@ impl FuseTable {
             (0..self.table_info.schema().fields().len())
                 .into_iter()
                 .collect::<Vec<usize>>()
-        };
-
-        let operator = ctx.get_storage_operator()?;
-        let table_schema = self.table_info.schema();
-        BlockReader::create(operator, table_schema, projection)
+        }
     }
 
     #[inline]
@@ -95,7 +68,8 @@ impl FuseTable {
         plan: &ReadDataSourcePlan,
         pipeline: &mut NewPipeline,
     ) -> Result<()> {
-        let block_reader = self.create_block_reader(&ctx, &plan.push_downs)?;
+        let block_reader =
+            self.create_block_reader(&ctx, self.projection_of_push_downs(&plan.push_downs))?;
 
         let parts_len = plan.parts.len();
         let max_threads = ctx.get_settings().get_max_threads()? as usize;
@@ -162,6 +136,10 @@ impl FuseTableSource {
 impl Processor for FuseTableSource {
     fn name(&self) -> &'static str {
         "FuseEngineSource"
+    }
+
+    fn as_any(&mut self) -> &mut dyn Any {
+        self
     }
 
     fn event(&mut self) -> Result<Event> {

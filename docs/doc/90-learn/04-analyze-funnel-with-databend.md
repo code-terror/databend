@@ -18,7 +18,7 @@ In Databend, it's **easy** and **performance** to do it using [WINDOW_FUNNEL FUN
 
 Make sure you have installed Databend, if not please see:
 
-* [How to Deploy Databend](../00-guides/index.md#deployment)
+* [How to Deploy Databend](../01-guides/index.md#deployment)
 
 ### 1.2 Create a Databend User
 
@@ -67,7 +67,7 @@ INSERT INTO events VALUES(100126, 'visit', '2022-05-15 12:01:00');
 
 Input table:
 
-``` sql
+```sql
 +---------+------------+----------------------------+
 | user_id | event_name | event_timestamp            |
 +---------+------------+----------------------------+
@@ -92,7 +92,7 @@ We have a table with the following fields:
 
 Find out how far the user `user_id` could get through the chain in an hour window slides.
 
-``` sql
+```sql
 SELECT
     level,
     count() AS count
@@ -114,7 +114,7 @@ The `event_timestamp` type is timestamp, `3600000000` is a hour time window.
 
 Result:
 
-``` sql
+```sql
 +-------+-------+
 | level | count |
 +-------+-------+

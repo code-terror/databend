@@ -28,8 +28,8 @@ use common_meta_types::NodeInfo;
 use common_meta_types::OkOrExist;
 use common_meta_types::Operation;
 use common_meta_types::SeqV;
-use common_meta_types::UpsertKVAction;
-use common_meta_types::UpsertKVActionReply;
+use common_meta_types::UpsertKVReply;
+use common_meta_types::UpsertKVReq;
 
 use crate::cluster::ClusterApi;
 
@@ -89,7 +89,7 @@ impl ClusterApi for ClusterMgr {
         let node_key = format!("{}/{}", self.cluster_prefix, escape_for_key(&node.id)?);
         let upsert_node = self
             .kv_api
-            .upsert_kv(UpsertKVAction::new(&node_key, seq, value, meta));
+            .upsert_kv(UpsertKVReq::new(&node_key, seq, value, meta));
 
         let res = upsert_node.await?.into_add_result()?;
 
@@ -109,8 +109,7 @@ impl ClusterApi for ClusterMgr {
         for (node_key, value) in values {
             let mut node_info = serde_json::from_slice::<NodeInfo>(&value.data)?;
 
-            let node_key = unescape_for_key(&node_key)?;
-            node_info.id = node_key[self.cluster_prefix.len() + 1..].to_string();
+            node_info.id = unescape_for_key(&node_key[self.cluster_prefix.len() + 1..])?;
             nodes_info.push(node_info);
         }
 
@@ -119,7 +118,7 @@ impl ClusterApi for ClusterMgr {
 
     async fn drop_node(&self, node_id: String, seq: Option<u64>) -> Result<()> {
         let node_key = format!("{}/{}", self.cluster_prefix, escape_for_key(&node_id)?);
-        let upsert_node = self.kv_api.upsert_kv(UpsertKVAction::new(
+        let upsert_node = self.kv_api.upsert_kv(UpsertKVReq::new(
             &node_key,
             seq.into(),
             Operation::Delete,
@@ -127,12 +126,12 @@ impl ClusterApi for ClusterMgr {
         ));
 
         match upsert_node.await? {
-            UpsertKVActionReply {
+            UpsertKVReply {
                 ident: None,
                 prev: Some(_),
                 result: None,
             } => Ok(()),
-            UpsertKVActionReply { .. } => Err(ErrorCode::ClusterUnknownNode(format!(
+            UpsertKVReply { .. } => Err(ErrorCode::ClusterUnknownNode(format!(
                 "unknown node {:?}",
                 node_id
             ))),
@@ -149,15 +148,15 @@ impl ClusterApi for ClusterMgr {
 
         let upsert_meta =
             self.kv_api
-                .upsert_kv(UpsertKVAction::new(&node_key, seq, Operation::AsIs, meta));
+                .upsert_kv(UpsertKVReq::new(&node_key, seq, Operation::AsIs, meta));
 
         match upsert_meta.await? {
-            UpsertKVActionReply {
+            UpsertKVReply {
                 ident: None,
                 prev: Some(_),
                 result: Some(SeqV { seq: s, .. }),
             } => Ok(s),
-            UpsertKVActionReply { .. } => self.add_node(node.clone()).await,
+            UpsertKVReply { .. } => self.add_node(node.clone()).await,
         }
     }
 }

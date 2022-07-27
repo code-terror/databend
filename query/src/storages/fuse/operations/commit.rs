@@ -20,21 +20,23 @@ use std::time::Instant;
 use backoff::backoff::Backoff;
 use backoff::ExponentialBackoffBuilder;
 use common_base::base::ProgressValues;
-use common_cache::Cache;
 use common_datavalues::DataSchema;
 use common_exception::ErrorCode;
 use common_exception::Result;
+use common_meta_app::schema::TableInfo;
+use common_meta_app::schema::TableStatistics;
+use common_meta_app::schema::UpdateTableMetaReply;
+use common_meta_app::schema::UpdateTableMetaReq;
 use common_meta_types::MatchSeq;
-use common_meta_types::TableInfo;
-use common_meta_types::TableStatistics;
-use common_meta_types::UpdateTableMetaReply;
-use common_meta_types::UpdateTableMetaReq;
 use common_tracing::tracing;
+use common_tracing::tracing::info;
+use common_tracing::tracing::warn;
 use uuid::Uuid;
 
 use crate::sessions::QueryContext;
 use crate::sql::OPT_KEY_LEGACY_SNAPSHOT_LOC;
 use crate::sql::OPT_KEY_SNAPSHOT_LOCATION;
+use crate::storages::fuse::meta::ClusterKey;
 use crate::storages::fuse::meta::Location;
 use crate::storages::fuse::meta::SegmentInfo;
 use crate::storages::fuse::meta::Statistics;
@@ -58,8 +60,6 @@ impl FuseTable {
         operation_log: TableOperationLog,
         overwrite: bool,
     ) -> Result<()> {
-        let tid = self.table_info.ident.table_id;
-
         let mut tbl = self;
         let mut latest: Arc<dyn Table>;
 
@@ -88,33 +88,49 @@ impl FuseTable {
             .with_max_elapsed_time(Some(max_elapsed))
             .build();
 
+        let transient = self.transient();
         let catalog_name = catalog_name.as_ref();
         loop {
             match tbl
                 .try_commit(ctx.as_ref(), catalog_name, &operation_log, overwrite)
                 .await
             {
-                Ok(_) => break Ok(()),
-                Err(e) if self::utils::is_error_recoverable(&e) => match backoff.next_backoff() {
+                Ok(_) => {
+                    break {
+                        if transient {
+                            // Removes historical data, if table is transient
+                            tracing::warn!(
+                                "transient table detected, purging historical data. ({})",
+                                tbl.table_info.ident
+                            );
+
+                            let latest = tbl.latest(&ctx, catalog_name).await?;
+                            tbl = FuseTable::try_from_table(latest.as_ref())?;
+
+                            let keep_last_snapshot = true;
+                            if let Err(e) = tbl.do_gc(&ctx, keep_last_snapshot).await {
+                                // Errors of GC, if any, are ignored, since GC task can be picked up
+                                warn!("GC of transient table not success (this is not a permanent error). the error : {}", e);
+                            } else {
+                                info!("GC of transient table done");
+                            }
+                        }
+                        Ok(())
+                    };
+                }
+                Err(e) if self::utils::is_error_recoverable(&e, transient) => match backoff
+                    .next_backoff()
+                {
                     Some(d) => {
                         let name = tbl.table_info.name.clone();
-                        tracing::warn!(
+                        tracing::debug!(
                                 "got error TableVersionMismatched, tx will be retried {} ms later. table name {}, identity {}",
                                 d.as_millis(),
                                 name.as_str(),
                                 tbl.table_info.ident
                             );
                         common_base::base::tokio::time::sleep(d).await;
-
-                        let catalog = ctx.get_catalog(catalog_name)?;
-                        let (ident, meta) = catalog.get_table_meta_by_id(tid).await?;
-                        let table_info: TableInfo = TableInfo {
-                            ident,
-                            desc: "".to_owned(),
-                            name,
-                            meta: meta.as_ref().clone(),
-                        };
-                        latest = catalog.get_table_by_info(&table_info)?;
+                        latest = tbl.latest(&ctx, catalog_name).await?;
                         tbl = FuseTable::try_from_table(latest.as_ref())?;
                         retry_times += 1;
                         continue;
@@ -146,6 +162,7 @@ impl FuseTable {
     ) -> Result<()> {
         let prev = self.read_table_snapshot(ctx).await?;
         let prev_version = self.snapshot_format_version();
+        let prev_timestamp = prev.as_ref().and_then(|v| v.timestamp);
         let schema = self.table_info.meta.schema.as_ref().clone();
         let (segments, summary) = Self::merge_append_operations(operation_log)?;
 
@@ -162,10 +179,12 @@ impl FuseTable {
         let new_snapshot = if overwrite {
             TableSnapshot::new(
                 Uuid::new_v4(),
+                &prev_timestamp,
                 prev.as_ref().map(|v| (v.snapshot_id, prev_version)),
                 schema,
                 summary,
                 segments,
+                self.cluster_key_meta.clone(),
             )
         } else {
             Self::merge_table_operations(
@@ -174,43 +193,21 @@ impl FuseTable {
                 prev_version,
                 segments,
                 summary,
+                self.cluster_key_meta.clone(),
             )?
         };
 
-        let uuid = new_snapshot.snapshot_id;
-        let snapshot_loc = self
-            .meta_location_generator()
-            .snapshot_location_from_uuid(&uuid, TableSnapshot::VERSION)?;
-        let bytes = serde_json::to_vec(&new_snapshot)?;
-        let operator = ctx.get_storage_operator()?;
-        operator.object(&snapshot_loc).write(bytes).await?;
+        let mut new_table_meta = self.get_table_info().meta.clone();
+        // update statistics
+        new_table_meta.statistics = TableStatistics {
+            number_of_rows: new_snapshot.summary.row_count,
+            data_bytes: new_snapshot.summary.uncompressed_byte_size,
+            compressed_data_bytes: new_snapshot.summary.compressed_byte_size,
+            index_data_bytes: 0, // TODO we do not have it yet
+        };
 
-        let result = Self::commit_to_meta_server(
-            ctx,
-            catalog_name,
-            self.get_table_info(),
-            snapshot_loc.clone(),
-            &new_snapshot.summary,
-        )
-        .await;
-
-        match result {
-            Ok(_) => {
-                if let Some(snapshot_cache) =
-                    ctx.get_storage_cache_manager().get_table_snapshot_cache()
-                {
-                    let cache = &mut snapshot_cache.write().await;
-                    cache.put(snapshot_loc, Arc::new(new_snapshot));
-                }
-                Ok(())
-            }
-            Err(e) => {
-                // commit snapshot to meta server failed, try to delete it.
-                // "major GC" will collect this, if deletion failure (even after DAL retried)
-                let _ = operator.object(&snapshot_loc).delete().await;
-                Err(e)
-            }
-        }
+        self.update_table_meta(ctx, catalog_name, &new_snapshot, &mut new_table_meta)
+            .await
     }
 
     fn merge_table_operations(
@@ -219,6 +216,7 @@ impl FuseTable {
         prev_version: u64,
         mut new_segments: Vec<Location>,
         statistics: Statistics,
+        cluster_key_meta: Option<ClusterKey>,
     ) -> Result<TableSnapshot> {
         // 1. merge stats with previous snapshot, if any
         let stats = if let Some(snapshot) = &previous {
@@ -228,6 +226,7 @@ impl FuseTable {
             statistics
         };
         let prev_snapshot_id = previous.as_ref().map(|v| (v.snapshot_id, prev_version));
+        let prev_snapshot_timestamp = previous.as_ref().and_then(|v| v.timestamp);
 
         // 2. merge segment locations with previous snapshot, if any
         if let Some(snapshot) = &previous {
@@ -237,15 +236,17 @@ impl FuseTable {
 
         let new_snapshot = TableSnapshot::new(
             Uuid::new_v4(),
+            &prev_snapshot_timestamp,
             prev_snapshot_id,
             schema.clone(),
             stats,
             new_segments,
+            cluster_key_meta,
         );
         Ok(new_snapshot)
     }
 
-    async fn commit_to_meta_server(
+    pub async fn commit_to_meta_server(
         ctx: &QueryContext,
         catalog_name: &str,
         table_info: &TableInfo,
@@ -281,7 +282,6 @@ impl FuseTable {
             new_table_meta,
         };
 
-        //catalog.upsert_table_option(req).await
         catalog.update_table_meta(req).await
     }
 
@@ -300,16 +300,10 @@ impl FuseTable {
                 acc.block_count += stats.block_count;
                 acc.uncompressed_byte_size += stats.uncompressed_byte_size;
                 acc.compressed_byte_size += stats.compressed_byte_size;
-                (acc.col_stats, acc.cluster_stats) = if acc.col_stats.is_empty() {
-                    (stats.col_stats.clone(), stats.cluster_stats.clone())
+                acc.col_stats = if acc.col_stats.is_empty() {
+                    stats.col_stats.clone()
                 } else {
-                    (
-                        statistics::reduce_block_stats(&[&acc.col_stats, &stats.col_stats])?,
-                        statistics::reduce_cluster_stats(&[
-                            &acc.cluster_stats,
-                            &stats.cluster_stats,
-                        ]),
-                    )
+                    statistics::reduce_block_statistics(&[&acc.col_stats, &stats.col_stats])?
                 };
                 seg_acc.push(loc.clone());
                 Ok::<_, ErrorCode>((acc, seg_acc))
@@ -317,6 +311,20 @@ impl FuseTable {
         )?;
 
         Ok((seg_locs, s))
+    }
+
+    async fn latest(&self, ctx: &QueryContext, catalog_name: &str) -> Result<Arc<dyn Table>> {
+        let name = self.table_info.name.clone();
+        let tid = self.table_info.ident.table_id;
+        let catalog = ctx.get_catalog(catalog_name)?;
+        let (ident, meta) = catalog.get_table_meta_by_id(tid).await?;
+        let table_info: TableInfo = TableInfo {
+            ident,
+            desc: "".to_owned(),
+            name,
+            meta: meta.as_ref().clone(),
+        };
+        catalog.get_table_by_info(&table_info)
     }
 }
 
@@ -344,8 +352,10 @@ mod utils {
     }
 
     #[inline]
-    pub fn is_error_recoverable(e: &ErrorCode) -> bool {
-        e.code() == ErrorCode::table_version_mismatched_code()
+    pub fn is_error_recoverable(e: &ErrorCode, is_table_transient: bool) -> bool {
+        let code = e.code();
+        code == ErrorCode::table_version_mismatched_code()
+            || (is_table_transient && code == ErrorCode::storage_not_found_code())
     }
 
     // check if there are any fuse table legacy options

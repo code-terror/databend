@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::convert::TryInto;
 use std::fmt::Debug;
 use std::time::SystemTime;
@@ -49,6 +50,8 @@ use common_meta_types::Operation;
 use common_meta_types::PbSeqV;
 use common_meta_types::SeqV;
 use common_meta_types::TxnCondition;
+use common_meta_types::TxnDeleteByPrefixRequest;
+use common_meta_types::TxnDeleteByPrefixResponse;
 use common_meta_types::TxnDeleteRequest;
 use common_meta_types::TxnDeleteResponse;
 use common_meta_types::TxnGetRequest;
@@ -69,7 +72,6 @@ use serde::Serialize;
 use crate::config::RaftConfig;
 use crate::sled_key_spaces::ClientLastResps;
 use crate::sled_key_spaces::GenericKV;
-use crate::sled_key_spaces::MetaSrvAddrs;
 use crate::sled_key_spaces::Nodes;
 use crate::sled_key_spaces::Sequences;
 use crate::sled_key_spaces::StateMachineMeta;
@@ -90,6 +92,8 @@ pub trait StateMachineSubscriber: Debug + Sync + Send {
     fn kv_changed(&self, key: &str, prev: Option<SeqV>, current: Option<SeqV>);
 }
 
+type NotifyKVEvent = (String, Option<SeqV>, Option<SeqV>);
+
 /// The state machine of the `MemStore`.
 /// It includes user data and two raft-related informations:
 /// `last_applied_logs` and `client_serial_responses` to achieve idempotence.
@@ -106,6 +110,7 @@ pub struct StateMachine {
 
 /// A key-value pair in a snapshot is a vec of two `Vec<u8>`.
 pub type SnapshotKeyValue = Vec<Vec<u8>>;
+type DeleteByPrefixKeyMap = BTreeMap<TxnDeleteByPrefixRequest, Vec<(String, SeqV)>>;
 
 /// Snapshot data for serialization and for transport.
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
@@ -215,6 +220,42 @@ impl StateMachine {
         Ok((snap, last_applied, snapshot_id))
     }
 
+    fn scan_prefix_if_needed(
+        &self,
+        entry: &Entry<LogEntry>,
+    ) -> Result<Option<(DeleteByPrefixKeyMap, DeleteByPrefixKeyMap)>, MetaStorageError> {
+        match entry.payload {
+            EntryPayload::Normal(ref data) => match &data.cmd {
+                Cmd::Transaction(txn) => {
+                    let kvs = self.kvs();
+                    let mut if_map = BTreeMap::new();
+                    let mut else_map = BTreeMap::new();
+                    for op in txn.if_then.iter() {
+                        if let Some(txn_op::Request::DeleteByPrefix(delete_by_prefix)) = &op.request
+                        {
+                            if_map.insert(
+                                delete_by_prefix.clone(),
+                                kvs.scan_prefix(&delete_by_prefix.prefix)?,
+                            );
+                        }
+                    }
+                    for op in txn.else_then.iter() {
+                        if let Some(txn_op::Request::DeleteByPrefix(delete_by_prefix)) = &op.request
+                        {
+                            else_map.insert(
+                                delete_by_prefix.clone(),
+                                kvs.scan_prefix(&delete_by_prefix.prefix)?,
+                            );
+                        }
+                    }
+                    Ok(Some((if_map, else_map)))
+                }
+                _ => Ok(None),
+            },
+            _ => Ok(None),
+        }
+    }
+
     /// Apply an log entry to state machine.
     ///
     /// If a duplicated log entry is detected by checking data.txid, no update
@@ -228,6 +269,8 @@ impl StateMachine {
         let log_id = &entry.log_id;
 
         tracing::debug!("sled tx start: {:?}", entry);
+
+        let kv_pairs = self.scan_prefix_if_needed(entry)?;
 
         let result = self.sm_tree.txn(true, move |txn_tree| {
             let txn_sm_meta = txn_tree.key_space::<StateMachineMeta>();
@@ -244,7 +287,7 @@ impl StateMachine {
                         }
                     }
 
-                    let res = self.apply_cmd(&data.cmd, &txn_tree);
+                    let res = self.apply_cmd(&data.cmd, &txn_tree, kv_pairs.as_ref());
                     let applied_state = res?;
 
                     if let Some(ref txid) = data.txid {
@@ -271,15 +314,7 @@ impl StateMachine {
             Ok(None)
         });
 
-        let opt_applied_state = match result {
-            Ok(x) => x,
-            Err(meta_sto_err) => {
-                return match meta_sto_err {
-                    MetaStorageError::AppError(app_err) => Ok(AppliedState::AppError(app_err)),
-                    _ => Err(meta_sto_err),
-                }
-            }
-        };
+        let opt_applied_state = result?;
 
         tracing::debug!("sled tx done: {:?}", entry);
 
@@ -339,43 +374,7 @@ impl StateMachine {
         Ok((prev, None).into())
     }
 
-    #[tracing::instrument(level = "debug", skip(self, txn_tree))]
-    fn apply_add_metasrv_addr_cmd(
-        &self,
-        metasrv_name: &String,
-        addr: &String,
-        txn_tree: &TransactionSledTree,
-    ) -> MetaStorageResult<AppliedState> {
-        let sm_metasrv_addrs = txn_tree.key_space::<MetaSrvAddrs>();
-
-        let prev = sm_metasrv_addrs.get(metasrv_name)?;
-        if prev.is_some() {
-            Ok((prev, None).into())
-        } else {
-            sm_metasrv_addrs.insert(metasrv_name, addr)?;
-            tracing::info!("applied AddMetaSrvAddr: {}={}", metasrv_name, addr);
-            Ok((prev, Some(addr.to_string())).into())
-        }
-    }
-
-    #[tracing::instrument(level = "debug", skip(self, txn_tree))]
-    fn apply_remove_metasrv_addr_cmd(
-        &self,
-        metasrv_name: &String,
-        txn_tree: &TransactionSledTree,
-    ) -> MetaStorageResult<AppliedState> {
-        let sm_metasrv_addrs = txn_tree.key_space::<MetaSrvAddrs>();
-
-        let prev = sm_metasrv_addrs.get(metasrv_name)?;
-
-        if prev.is_some() {
-            tracing::info!("applied RemoveMetaSrvAddr: {}={:?}", metasrv_name, prev);
-            sm_metasrv_addrs.remove(metasrv_name)?;
-        }
-        Ok((prev, None).into())
-    }
-
-    #[tracing::instrument(level = "debug", skip(self, txn_tree))]
+    #[tracing::instrument(level = "debug", skip(self, txn_tree, key, seq, value_op))]
     fn apply_update_kv_cmd(
         &self,
         key: &str,
@@ -384,6 +383,14 @@ impl StateMachine {
         value_meta: &Option<KVMeta>,
         txn_tree: &TransactionSledTree,
     ) -> MetaStorageResult<AppliedState> {
+        tracing::debug!(
+            key = display(key),
+            seq = debug(seq),
+            value_op = debug(value_op),
+            value_meta = debug(value_meta),
+            "kv_cmd"
+        );
+
         let sub_tree = txn_tree.key_space::<GenericKV>();
         let key_str = key.to_string();
         let (prev, result) = self.txn_sub_tree_upsert(
@@ -522,16 +529,21 @@ impl StateMachine {
         txn_tree: &TransactionSledTree,
         put: &TxnPutRequest,
         resp: &mut TxnReply,
+        events: &mut Option<Vec<NotifyKVEvent>>,
     ) -> MetaStorageResult<()> {
         let sub_tree = txn_tree.key_space::<GenericKV>();
 
-        let (prev, _result) = self.txn_sub_tree_upsert(
+        let (prev, result) = self.txn_sub_tree_upsert(
             &sub_tree,
             &put.key,
             &MatchSeq::Any,
             Operation::Update(put.value.clone()),
             None,
         )?;
+
+        if let Some(events) = events {
+            events.push((put.key.to_string(), prev.clone(), result));
+        }
 
         let put_resp = TxnPutResponse {
             key: put.key.clone(),
@@ -554,16 +566,21 @@ impl StateMachine {
         txn_tree: &TransactionSledTree,
         delete: &TxnDeleteRequest,
         resp: &mut TxnReply,
+        events: &mut Option<Vec<NotifyKVEvent>>,
     ) -> MetaStorageResult<()> {
         let sub_tree = txn_tree.key_space::<GenericKV>();
 
-        let (prev, _result) = self.txn_sub_tree_upsert(
+        let (prev, result) = self.txn_sub_tree_upsert(
             &sub_tree,
             &delete.key,
             &MatchSeq::Any,
             Operation::Delete,
             None,
         )?;
+
+        if let Some(events) = events {
+            events.push((delete.key.to_string(), prev.clone(), result));
+        }
 
         let del_resp = TxnDeleteResponse {
             key: delete.key.clone(),
@@ -582,12 +599,58 @@ impl StateMachine {
         Ok(())
     }
 
+    fn txn_execute_delete_by_prefix_operation(
+        &self,
+        txn_tree: &TransactionSledTree,
+        delete_by_prefix: &TxnDeleteByPrefixRequest,
+        kv_pairs: Option<&DeleteByPrefixKeyMap>,
+        resp: &mut TxnReply,
+        events: &mut Option<Vec<NotifyKVEvent>>,
+    ) -> MetaStorageResult<()> {
+        let mut count: u32 = 0;
+        if let Some(kv_pairs) = kv_pairs {
+            if let Some(kv_pairs) = kv_pairs.get(delete_by_prefix) {
+                let sub_tree = txn_tree.key_space::<GenericKV>();
+                for (key, _seq) in kv_pairs.iter() {
+                    let ret = self.txn_sub_tree_upsert(
+                        &sub_tree,
+                        key,
+                        &MatchSeq::Any,
+                        Operation::Delete,
+                        None,
+                    );
+
+                    if let Ok(ret) = ret {
+                        count += 1;
+
+                        if let Some(events) = events {
+                            events.push((key.to_string(), ret.0.clone(), ret.1));
+                        }
+                    }
+                }
+            }
+        }
+
+        let del_resp = TxnDeleteByPrefixResponse {
+            prefix: delete_by_prefix.prefix.clone(),
+            count,
+        };
+
+        resp.responses.push(TxnOpResponse {
+            response: Some(txn_op_response::Response::DeleteByPrefix(del_resp)),
+        });
+
+        Ok(())
+    }
+
     #[tracing::instrument(level = "debug", skip(self, txn_tree, op, resp))]
     fn txn_execute_operation(
         &self,
         txn_tree: &TransactionSledTree,
         op: &TxnOp,
+        kv_pairs: Option<&DeleteByPrefixKeyMap>,
         resp: &mut TxnReply,
+        events: &mut Option<Vec<NotifyKVEvent>>,
     ) -> MetaStorageResult<()> {
         tracing::debug!(op = display(op), "txn execute TxnOp");
         match &op.request {
@@ -595,10 +658,19 @@ impl StateMachine {
                 self.txn_execute_get_operation(txn_tree, get, resp)?;
             }
             Some(txn_op::Request::Put(put)) => {
-                self.txn_execute_put_operation(txn_tree, put, resp)?;
+                self.txn_execute_put_operation(txn_tree, put, resp, events)?;
             }
             Some(txn_op::Request::Delete(delete)) => {
-                self.txn_execute_delete_operation(txn_tree, delete, resp)?;
+                self.txn_execute_delete_operation(txn_tree, delete, resp, events)?;
+            }
+            Some(txn_op::Request::DeleteByPrefix(delete_by_prefix)) => {
+                self.txn_execute_delete_by_prefix_operation(
+                    txn_tree,
+                    delete_by_prefix,
+                    kv_pairs,
+                    resp,
+                    events,
+                )?;
             }
             None => {}
         }
@@ -611,17 +683,29 @@ impl StateMachine {
         &self,
         req: &TxnRequest,
         txn_tree: &TransactionSledTree,
+        kv_pairs: Option<&(DeleteByPrefixKeyMap, DeleteByPrefixKeyMap)>,
     ) -> MetaStorageResult<AppliedState> {
         tracing::debug!(txn = display(req), "apply txn cmd");
 
         let condition = &req.condition;
 
         let ops: &Vec<TxnOp>;
+        let kv_op_pairs: Option<&DeleteByPrefixKeyMap>;
         let success = if self.txn_execute_condition(txn_tree, condition)? {
             ops = &req.if_then;
+            kv_op_pairs = if let Some(kv_pairs) = kv_pairs {
+                Some(&kv_pairs.0)
+            } else {
+                None
+            };
             true
         } else {
             ops = &req.else_then;
+            kv_op_pairs = if let Some(kv_pairs) = kv_pairs {
+                Some(&kv_pairs.1)
+            } else {
+                None
+            };
             false
         };
 
@@ -631,8 +715,21 @@ impl StateMachine {
             responses: vec![],
         };
 
+        let mut events: Option<Vec<NotifyKVEvent>> = if self.subscriber.is_some() {
+            Some(vec![])
+        } else {
+            None
+        };
         for op in ops {
-            self.txn_execute_operation(txn_tree, op, &mut resp)?;
+            self.txn_execute_operation(txn_tree, op, kv_op_pairs, &mut resp, &mut events)?;
+        }
+
+        if let Some(subscriber) = &self.subscriber {
+            if let Some(events) = events {
+                for event in events {
+                    subscriber.kv_changed(&event.0, event.1, event.2);
+                }
+            }
         }
 
         Ok(AppliedState::TxnReply(resp))
@@ -648,6 +745,7 @@ impl StateMachine {
         &self,
         cmd: &Cmd,
         txn_tree: &TransactionSledTree,
+        kv_pairs: Option<&(DeleteByPrefixKeyMap, DeleteByPrefixKeyMap)>,
     ) -> Result<AppliedState, MetaStorageError> {
         tracing::debug!("apply_cmd: {:?}", cmd);
 
@@ -661,15 +759,6 @@ impl StateMachine {
 
             Cmd::RemoveNode { ref node_id } => self.apply_remove_node_cmd(node_id, txn_tree),
 
-            Cmd::AddMetaSrvAddr {
-                ref metasrv_name,
-                ref metasrv_addr,
-            } => self.apply_add_metasrv_addr_cmd(metasrv_name, metasrv_addr, txn_tree),
-
-            Cmd::RemoveMetaSrvAddr { ref metasrv_name } => {
-                self.apply_remove_metasrv_addr_cmd(metasrv_name, txn_tree)
-            }
-
             Cmd::UpsertKV {
                 key,
                 seq,
@@ -677,7 +766,7 @@ impl StateMachine {
                 value_meta,
             } => self.apply_update_kv_cmd(key, seq, value_op, value_meta, txn_tree),
 
-            Cmd::Transaction(txn) => self.apply_txn_cmd(txn, txn_tree),
+            Cmd::Transaction(txn) => self.apply_txn_cmd(txn, txn_tree, kv_pairs),
         }
     }
 
@@ -791,6 +880,12 @@ impl StateMachine {
         Ok(last_applied)
     }
 
+    pub async fn add_node(&self, node_id: u64, node: &Node) -> MetaStorageResult<()> {
+        let sm_nodes = self.nodes();
+        sm_nodes.insert(&node_id, node).await?;
+        Ok(())
+    }
+
     pub fn get_client_last_resp(&self, key: &str) -> MetaResult<Option<(u64, AppliedState)>> {
         let client_last_resps = self.client_last_resps();
         let v: Option<ClientLastRespValue> = client_last_resps.get(&key.to_string())?;
@@ -832,14 +927,6 @@ impl StateMachine {
 
     pub fn get_nodes(&self) -> MetaResult<Vec<Node>> {
         let sm_nodes = self.nodes();
-        match sm_nodes.range_values(..) {
-            Ok(e) => Ok(e),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    pub fn get_metasrv_addrs(&self) -> MetaResult<Vec<String>> {
-        let sm_nodes = self.metasrv_addrs();
         match sm_nodes.range_values(..) {
             Ok(e) => Ok(e),
             Err(e) => Err(e.into()),
@@ -890,10 +977,6 @@ impl StateMachine {
     }
 
     pub fn nodes(&self) -> AsKeySpace<Nodes> {
-        self.sm_tree.key_space()
-    }
-
-    pub fn metasrv_addrs(&self) -> AsKeySpace<MetaSrvAddrs> {
         self.sm_tree.key_space()
     }
 

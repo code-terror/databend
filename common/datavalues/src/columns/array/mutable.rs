@@ -32,7 +32,11 @@ impl MutableArrayColumn {
     pub fn append_value(&mut self, array_value: ArrayValue) {
         let offset = array_value.values.len();
         for value in array_value.values {
-            self.inner_column.append_data_value(value).unwrap();
+            if self.inner_data_type.is_nullable() && value.is_null() {
+                self.inner_column.append_default();
+            } else {
+                self.inner_column.append_data_value(value).unwrap();
+            }
         }
         self.add_offset(offset);
     }
@@ -71,7 +75,7 @@ impl MutableArrayColumn {
 impl Default for MutableArrayColumn {
     fn default() -> Self {
         Self::with_capacity_meta(0, ColumnMeta::Array {
-            data_type: UInt64Type::new_impl(),
+            inner_type: NullType::new_impl(),
         })
     }
 }
@@ -112,7 +116,11 @@ impl MutableColumn for MutableArrayColumn {
             DataValue::Array(vals) => {
                 offset += vals.len();
                 for val in vals {
-                    self.inner_column.append_data_value(val)?;
+                    if self.inner_data_type.is_nullable() && val.is_null() {
+                        self.inner_column.append_default();
+                    } else {
+                        self.inner_column.append_data_value(val)?;
+                    }
                 }
             }
             _ => {
@@ -145,15 +153,15 @@ impl ScalarColumnBuilder for MutableArrayColumn {
 
     fn with_capacity_meta(capacity: usize, meta: ColumnMeta) -> Self {
         match meta {
-            ColumnMeta::Array { data_type } => {
+            ColumnMeta::Array { inner_type } => {
                 let mut offsets = Vec::with_capacity(capacity + 1);
                 offsets.push(0);
 
                 Self {
-                    inner_data_type: data_type.clone(),
+                    inner_data_type: inner_type.clone(),
                     last_offset: 0,
                     offsets,
-                    inner_column: data_type.create_mutable(capacity),
+                    inner_column: inner_type.create_mutable(capacity),
                 }
             }
             _ => panic!("must be ColumnMeta::Array"),
@@ -168,14 +176,22 @@ impl ScalarColumnBuilder for MutableArrayColumn {
                 if let DataValue::Array(vals) = value {
                     offset += vals.len();
                     for val in vals {
-                        self.inner_column.append_data_value(val).unwrap();
+                        if self.inner_data_type.is_nullable() && val.is_null() {
+                            self.inner_column.append_default();
+                        } else {
+                            self.inner_column.append_data_value(val).unwrap();
+                        }
                     }
                 }
             }
             ArrayValueRef::ValueRef { val } => {
                 offset += val.values.len();
                 for value in val.values.clone() {
-                    self.inner_column.append_data_value(value).unwrap();
+                    if self.inner_data_type.is_nullable() && value.is_null() {
+                        self.inner_column.append_default();
+                    } else {
+                        self.inner_column.append_data_value(value).unwrap();
+                    }
                 }
             }
         }

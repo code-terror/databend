@@ -1,17 +1,27 @@
 from abc import ABC
 from datetime import datetime, date
-from types import NoneType
 
 import mysql.connector
 
 import logictest
 from log import log
 
+import mysql.connector
+from mysql.connector.conversion import MySQLConverter
+
+
+class StringConverter(MySQLConverter):
+
+    def _DATETIME_to_python(self, value, dsc=None):
+        if not value:
+            return None
+        return MySQLConverter._STRING_to_python(self, value)
+
 
 class TestMySQL(logictest.SuiteRunner, ABC):
 
-    def __init__(self, kind):
-        super().__init__(kind)
+    def __init__(self, kind, pattern):
+        super().__init__(kind, pattern)
         self._connection = None
 
     def reset_connection(self):
@@ -22,6 +32,8 @@ class TestMySQL(logictest.SuiteRunner, ABC):
     def get_connection(self):
         if self._connection is not None:
             return self._connection
+        if "converter_class" not in self.driver:
+            self.driver["converter_class"] = StringConverter
         self._connection = mysql.connector.connect(**self.driver)
         return self._connection
 
@@ -51,9 +63,10 @@ class TestMySQL(logictest.SuiteRunner, ABC):
         vals = []
         for (ri, row) in enumerate(r):
             for (i, v) in enumerate(row):
-                if isinstance(v, NoneType):
-                    vals.append("None")
+                if isinstance(v, type(None)):
+                    vals.append("NULL")
                     continue
+
                 if query_type[i] == 'I':
                     if not isinstance(v, int):
                         log.error(

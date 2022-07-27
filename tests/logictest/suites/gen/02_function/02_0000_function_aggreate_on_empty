@@ -158,23 +158,24 @@ select arg_max(1, 1) from numbers_mt (10) where 1=2;
 ----  
 0
 
-statement query F label(mysql,http)
+statement query F label(http)
 select avg(number) from numbers_mt (10) where 1 = 2;
 
-----  mysql
+---- 
 nan
 
 ----  http
-None
+NaN
 
-statement query F label(mysql,http)
+
+statement query F label(http)
 select avg(1) from numbers_mt (10) where 1=2;
 
-----  mysql
+---- 
 nan
 
 ----  http
-None
+NaN
 
 statement ok
 select avg(number) from numbers_mt (10) where 1 = 2 group by number % 2;

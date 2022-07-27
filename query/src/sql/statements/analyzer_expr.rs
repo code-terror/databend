@@ -23,6 +23,7 @@ use common_ast::udfs::UDFFetcher;
 use common_ast::udfs::UDFParser;
 use common_ast::udfs::UDFTransformer;
 use common_datavalues::prelude::*;
+use common_datavalues::type_coercion::merge_types;
 use common_exception::ErrorCode;
 use common_exception::Result;
 use common_functions::aggregates::AggregateFunctionFactory;
@@ -36,6 +37,7 @@ use sqlparser::ast::Ident;
 use sqlparser::ast::Query;
 use sqlparser::ast::UnaryOperator;
 use sqlparser::ast::Value;
+use sqlparser::ast::WindowSpec;
 
 use crate::procedures::ContextFunction;
 use crate::sessions::QueryContext;
@@ -184,28 +186,33 @@ impl ExpressionAnalyzer {
     }
 
     fn analyze_function(&self, info: &FunctionExprInfo, args: &mut Vec<Expression>) -> Result<()> {
-        let mut arguments = Vec::with_capacity(info.args_count);
-        for _ in 0..info.args_count {
-            match args.pop() {
-                None => {
-                    return Err(ErrorCode::LogicalError("It's a bug."));
+        let func = match &info.over {
+            Some(_) => self.window_function(info, args)?,
+            None => {
+                let mut arguments = Vec::with_capacity(info.args_count);
+                for _ in 0..info.args_count {
+                    match args.pop() {
+                        None => {
+                            return Err(ErrorCode::LogicalError("It's a bug."));
+                        }
+                        Some(arg) => {
+                            arguments.insert(0, arg);
+                        }
+                    }
                 }
-                Some(arg) => {
-                    arguments.insert(0, arg);
-                }
-            }
-        }
 
-        args.push(
-            match AggregateFunctionFactory::instance().check(&info.name) {
-                true => self.aggr_function(info, &arguments),
-                false => match info.kind {
-                    OperatorKind::Unary => Self::unary_function(info, &arguments),
-                    OperatorKind::Binary => Self::binary_function(info, &arguments),
-                    OperatorKind::Other => self.other_function(info, &arguments),
-                },
-            }?,
-        );
+                match AggregateFunctionFactory::instance().check(&info.name) {
+                    true => self.aggr_function(info, &arguments),
+                    false => match info.kind {
+                        OperatorKind::Unary => Self::unary_function(info, &arguments),
+                        OperatorKind::Binary => Self::binary_function(info, &arguments),
+                        OperatorKind::Other => self.other_function(info, &arguments),
+                    },
+                }?
+            }
+        };
+
+        args.push(func);
         Ok(())
     }
 
@@ -298,6 +305,93 @@ impl ExpressionAnalyzer {
                 params: parameters,
             })
         }
+    }
+
+    fn window_function(
+        &self,
+        info: &FunctionExprInfo,
+        args: &mut Vec<Expression>,
+    ) -> Result<Expression> {
+        // window function partition by and order by args
+        let mut partition_by = vec![];
+        let mut order_by_expr = vec![];
+        if let Some(window_spec) = &info.over {
+            let order_by_args_count = window_spec.order_by.len();
+            let partition_by_args_count = window_spec.partition_by.len();
+
+            for i in 0..partition_by_args_count + order_by_args_count {
+                match args.pop() {
+                    None => {
+                        return Err(ErrorCode::LogicalError("It's a bug."));
+                    }
+                    Some(arg) => {
+                        if i < order_by_args_count {
+                            order_by_expr.insert(0, arg);
+                        } else {
+                            partition_by.insert(0, arg);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut parameters = Vec::with_capacity(info.parameters.len());
+
+        for parameter in &info.parameters {
+            match ValueExprAnalyzer::analyze(
+                parameter,
+                self.context.get_current_session().get_type(),
+            )? {
+                Expression::Literal { value, .. } => {
+                    parameters.push(value);
+                }
+                expr => {
+                    return Err(ErrorCode::SyntaxException(format!(
+                        "Unsupported value expression: {:?}, must be datavalue",
+                        expr
+                    )));
+                }
+            };
+        }
+
+        let mut arguments = Vec::with_capacity(info.args_count);
+        for _ in 0..info.args_count {
+            match args.pop() {
+                None => {
+                    return Err(ErrorCode::LogicalError("It's a bug."));
+                }
+                Some(arg) => {
+                    arguments.insert(0, arg);
+                }
+            }
+        }
+
+        let window_spec = info.over.as_ref().unwrap();
+
+        let order_by: Vec<Expression> = order_by_expr
+            .into_iter()
+            .zip(window_spec.order_by.clone())
+            .map(|(expr_sort_on, parser_sort_expr)| Expression::Sort {
+                expr: Box::new(expr_sort_on.clone()),
+                asc: parser_sort_expr.asc.unwrap_or(true),
+                nulls_first: parser_sort_expr.nulls_first.unwrap_or(true),
+                origin_expr: Box::new(expr_sort_on),
+            })
+            .collect();
+
+        let window_frame = window_spec
+            .window_frame
+            .clone()
+            .map(|wf| wf.try_into().unwrap());
+
+        Ok(Expression::WindowFunction {
+            op: info.name.clone(),
+            params: parameters,
+            args: arguments,
+            partition_by,
+            order_by,
+            window_frame,
+        })
     }
 
     fn analyze_identifier(&self, ident: &Ident, arguments: &mut Vec<Expression>) -> Result<()> {
@@ -474,14 +568,19 @@ impl ExpressionAnalyzer {
 
     fn analyze_array(&self, nums: usize, args: &mut Vec<Expression>) -> Result<()> {
         let mut values = Vec::with_capacity(nums);
+        let mut types = Vec::with_capacity(nums);
         for _ in 0..nums {
             match args.pop() {
                 None => {
                     break;
                 }
                 Some(inner_expr) => {
-                    if let Expression::Literal { value, .. } = inner_expr {
+                    if let Expression::Literal {
+                        value, data_type, ..
+                    } = inner_expr
+                    {
                         values.push(value);
+                        types.push(data_type);
                     }
                 }
             };
@@ -492,9 +591,20 @@ impl ExpressionAnalyzer {
                 nums
             )));
         }
+        let inner_type = if types.is_empty() {
+            NullType::new_impl()
+        } else {
+            types
+                .iter()
+                .fold(Ok(types[0].clone()), |acc, v| merge_types(&acc?, v))
+                .map_err(|e| ErrorCode::LogicalError(e.message()))?
+        };
         values.reverse();
 
-        let array_value = Expression::create_literal(DataValue::Array(values));
+        let array_value = Expression::create_literal_with_type(
+            DataValue::Array(values),
+            ArrayType::new_impl(inner_type),
+        );
         args.push(array_value);
         Ok(())
     }
@@ -512,6 +622,7 @@ struct FunctionExprInfo {
     args_count: usize,
     kind: OperatorKind,
     parameters: Vec<Value>,
+    over: Option<WindowSpec>,
 }
 
 struct InListInfo {
@@ -542,6 +653,7 @@ impl ExprRPNItem {
             args_count,
             kind: OperatorKind::Other,
             parameters: Vec::new(),
+            over: None,
         })
     }
 
@@ -552,6 +664,7 @@ impl ExprRPNItem {
             args_count: 2,
             kind: OperatorKind::Binary,
             parameters: Vec::new(),
+            over: None,
         })
     }
 
@@ -562,6 +675,7 @@ impl ExprRPNItem {
             args_count: 1,
             kind: OperatorKind::Unary,
             parameters: Vec::new(),
+            over: None,
         })
     }
 }
@@ -627,6 +741,7 @@ impl ExprRPNBuilder {
                     args_count: function.args.len(),
                     kind: OperatorKind::Other,
                     parameters: function.params.to_owned(),
+                    over: function.over.clone(),
                 }));
             }
             Expr::Cast {

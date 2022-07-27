@@ -21,12 +21,12 @@ use clap::Parser;
 use common_base::base::mask_string;
 use common_exception::ErrorCode;
 use common_exception::Result;
-use common_io::prelude::StorageAzblobConfig as InnerStorageAzblobConfig;
-use common_io::prelude::StorageConfig as InnerStorageConfig;
-use common_io::prelude::StorageFsConfig as InnerStorageFsConfig;
-use common_io::prelude::StorageHdfsConfig as InnerStorageHdfsConfig;
-use common_io::prelude::StorageParams;
-use common_io::prelude::StorageS3Config as InnerStorageS3Config;
+use common_storage::StorageAzblobConfig as InnerStorageAzblobConfig;
+use common_storage::StorageConfig as InnerStorageConfig;
+use common_storage::StorageFsConfig as InnerStorageFsConfig;
+use common_storage::StorageHdfsConfig as InnerStorageHdfsConfig;
+use common_storage::StorageParams;
+use common_storage::StorageS3Config as InnerStorageS3Config;
 use common_tracing::Config as InnerLogConfig;
 use serde::Deserialize;
 use serde::Serialize;
@@ -39,6 +39,7 @@ use super::inner::Config as InnerConfig;
 use super::inner::HiveCatalogConfig as InnerHiveCatalogConfig;
 use super::inner::MetaConfig as InnerMetaConfig;
 use super::inner::QueryConfig as InnerQueryConfig;
+use crate::DATABEND_COMMIT_VERSION;
 
 /// Outer config for `query`.
 ///
@@ -51,10 +52,14 @@ use super::inner::QueryConfig as InnerQueryConfig;
 /// It's forbidden to do any breaking changes on this struct.
 /// Only adding new fields is allowed.
 /// This same rules should be applied to all fields of this struct.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Parser)]
-#[clap(about, version, author)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Parser)]
+#[clap(about, version = &**DATABEND_COMMIT_VERSION, author)]
 #[serde(default)]
 pub struct Config {
+    /// Run a command and quit
+    #[clap(long, default_value_t)]
+    pub cmd: String,
+
     #[clap(long, short = 'c', default_value_t)]
     pub config_file: String,
 
@@ -123,6 +128,7 @@ impl Config {
 impl From<InnerConfig> for Config {
     fn from(inner: InnerConfig) -> Self {
         Self {
+            cmd: inner.cmd,
             config_file: inner.config_file,
             query: inner.query.into(),
             log: inner.log.into(),
@@ -138,6 +144,7 @@ impl TryInto<InnerConfig> for Config {
 
     fn try_into(self) -> Result<InnerConfig> {
         Ok(InnerConfig {
+            cmd: self.cmd,
             config_file: self.config_file,
             query: self.query.try_into()?,
             log: self.log.try_into()?,
@@ -149,10 +156,9 @@ impl TryInto<InnerConfig> for Config {
 }
 
 /// Storage config group.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Args)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Args)]
 #[serde(default)]
 pub struct StorageConfig {
-    /// Current storage type: fs|s3
     #[clap(long, default_value = "fs")]
     #[serde(rename = "type", alias = "storage_type")]
     pub storage_type: String,
@@ -160,6 +166,9 @@ pub struct StorageConfig {
     #[clap(long, default_value_t)]
     #[serde(rename = "num_cpus", alias = "storage_num_cpus")]
     pub storage_num_cpus: u64,
+
+    #[clap(long = "storage-allow-insecure")]
+    pub allow_insecure: bool,
 
     // Fs storage backend config.
     #[clap(flatten)]
@@ -189,6 +198,7 @@ impl From<InnerStorageConfig> for StorageConfig {
         let mut cfg = Self {
             storage_num_cpus: inner.num_cpus,
             storage_type: "".to_string(),
+            allow_insecure: inner.allow_insecure,
             fs: Default::default(),
             s3: Default::default(),
             azblob: Default::default(),
@@ -228,6 +238,7 @@ impl TryInto<InnerStorageConfig> for StorageConfig {
     fn try_into(self) -> Result<InnerStorageConfig> {
         Ok(InnerStorageConfig {
             num_cpus: self.storage_num_cpus,
+            allow_insecure: self.allow_insecure,
             params: {
                 match self.storage_type.as_str() {
                     "azblob" => StorageParams::Azblob(self.azblob.try_into()?),
@@ -243,7 +254,7 @@ impl TryInto<InnerStorageConfig> for StorageConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Args)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Args)]
 #[serde(default)]
 pub struct FsStorageConfig {
     /// fs storage backend data path
@@ -308,6 +319,9 @@ pub struct S3StorageConfig {
     // TODO(xuanwo): We should support both AWS SSE and CSE in the future.
     #[clap(long = "storage-s3-master-key", default_value_t)]
     pub master_key: String,
+
+    #[clap(long = "storage-s3-enable-virtual-host-style")]
+    pub enable_virtual_host_style: bool,
 }
 
 impl Default for S3StorageConfig {
@@ -323,6 +337,7 @@ impl fmt::Debug for S3StorageConfig {
             .field("region", &self.region)
             .field("bucket", &self.bucket)
             .field("root", &self.root)
+            .field("enable_virtual_host_style", &self.enable_virtual_host_style)
             .field("access_key_id", &mask_string(&self.access_key_id, 3))
             .field(
                 "secret_access_key",
@@ -343,6 +358,7 @@ impl From<InnerStorageS3Config> for S3StorageConfig {
             bucket: inner.bucket,
             root: inner.root,
             master_key: inner.master_key,
+            enable_virtual_host_style: inner.enable_virtual_host_style,
         }
     }
 }
@@ -359,11 +375,13 @@ impl TryInto<InnerStorageS3Config> for S3StorageConfig {
             secret_access_key: self.secret_access_key,
             master_key: self.master_key,
             root: self.root,
+            disable_credential_loader: false,
+            enable_virtual_host_style: self.enable_virtual_host_style,
         })
     }
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize, Args)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Args)]
 #[serde(default)]
 pub struct AzblobStorageConfig {
     /// Account for Azblob
@@ -439,7 +457,7 @@ impl TryInto<InnerStorageAzblobConfig> for AzblobStorageConfig {
     }
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize, Args, Debug)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Args, Debug)]
 #[serde(default)]
 pub struct HdfsConfig {
     #[clap(long = "storage-hdfs-name-node", default_value_t)]
@@ -479,7 +497,7 @@ impl TryInto<InnerStorageHdfsConfig> for HdfsConfig {
 }
 
 /// Query config group.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Args)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Args)]
 #[serde(default)]
 pub struct QueryConfig {
     /// Tenant id for get the information from the MetaSrv.
@@ -507,6 +525,12 @@ pub struct QueryConfig {
 
     #[clap(long, default_value = "9000")]
     pub clickhouse_handler_port: u16,
+
+    #[clap(long, default_value = "127.0.0.1")]
+    pub clickhouse_http_handler_host: String,
+
+    #[clap(long, default_value = "8124")]
+    pub clickhouse_http_handler_port: u16,
 
     #[clap(long, default_value = "127.0.0.1")]
     pub http_handler_host: String,
@@ -607,6 +631,18 @@ pub struct QueryConfig {
 
     #[clap(long, default_value_t)]
     pub jwt_key_file: String,
+
+    /// The maximum memory size of the buffered data collected per insert before being inserted.
+    #[clap(long, default_value = "10000")]
+    pub async_insert_max_data_size: u64,
+
+    /// The maximum timeout in milliseconds since the first insert before inserting collected data.
+    #[clap(long, default_value = "200")]
+    pub async_insert_busy_timeout: u64,
+
+    /// The maximum timeout in milliseconds since the last insert before inserting collected data.
+    #[clap(long, default_value = "0")]
+    pub async_insert_stale_timeout: u64,
 }
 
 impl Default for QueryConfig {
@@ -628,6 +664,8 @@ impl TryInto<InnerQueryConfig> for QueryConfig {
             max_active_sessions: self.max_active_sessions,
             clickhouse_handler_host: self.clickhouse_handler_host,
             clickhouse_handler_port: self.clickhouse_handler_port,
+            clickhouse_http_handler_host: self.clickhouse_http_handler_host,
+            clickhouse_http_handler_port: self.clickhouse_http_handler_port,
             http_handler_host: self.http_handler_host,
             http_handler_port: self.http_handler_port,
             http_handler_result_timeout_millis: self.http_handler_result_timeout_millis,
@@ -657,6 +695,9 @@ impl TryInto<InnerQueryConfig> for QueryConfig {
             table_disk_cache_mb_size: self.table_disk_cache_mb_size,
             management_mode: self.management_mode,
             jwt_key_file: self.jwt_key_file,
+            async_insert_max_data_size: self.async_insert_max_data_size,
+            async_insert_busy_timeout: self.async_insert_busy_timeout,
+            async_insert_stale_timeout: self.async_insert_stale_timeout,
         })
     }
 }
@@ -672,6 +713,8 @@ impl From<InnerQueryConfig> for QueryConfig {
             max_active_sessions: inner.max_active_sessions,
             clickhouse_handler_host: inner.clickhouse_handler_host,
             clickhouse_handler_port: inner.clickhouse_handler_port,
+            clickhouse_http_handler_host: inner.clickhouse_http_handler_host,
+            clickhouse_http_handler_port: inner.clickhouse_http_handler_port,
             http_handler_host: inner.http_handler_host,
             http_handler_port: inner.http_handler_port,
             http_handler_result_timeout_millis: inner.http_handler_result_timeout_millis,
@@ -701,11 +744,14 @@ impl From<InnerQueryConfig> for QueryConfig {
             table_disk_cache_mb_size: inner.table_disk_cache_mb_size,
             management_mode: inner.management_mode,
             jwt_key_file: inner.jwt_key_file,
+            async_insert_max_data_size: inner.async_insert_max_data_size,
+            async_insert_busy_timeout: inner.async_insert_busy_timeout,
+            async_insert_stale_timeout: inner.async_insert_stale_timeout,
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Args)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Args)]
 #[serde(default)]
 pub struct LogConfig {
     /// Log level <DEBUG|INFO|ERROR>
@@ -752,7 +798,7 @@ impl From<InnerLogConfig> for LogConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Args)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Args)]
 #[serde(default)]
 pub struct HiveCatalogConfig {
     #[clap(long = "hive-meta-store-address", default_value = "127.0.0.1:9083")]
@@ -789,7 +835,7 @@ impl From<InnerHiveCatalogConfig> for HiveCatalogConfig {
 
 /// Meta config group.
 /// TODO(xuanwo): All meta_xxx should be rename to xxx.
-#[derive(Clone, PartialEq, Serialize, Deserialize, Args)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Args)]
 #[serde(default)]
 pub struct MetaConfig {
     /// The dir to store persisted meta state for a embedded meta store
@@ -823,6 +869,12 @@ pub struct MetaConfig {
     #[serde(alias = "meta_client_timeout_in_second")]
     pub client_timeout_in_second: u64,
 
+    /// AutoSyncInterval is the interval to update endpoints with its latest members.
+    /// 0 disables auto-sync. By default auto-sync is disabled.
+    #[clap(long = "auto-sync-interval", default_value = "0")]
+    #[serde(alias = "auto_sync_interval")]
+    pub auto_sync_interval: u64,
+
     /// Certificate for client to identify meta rpc serve
     #[clap(long = "meta-rpc-tls-meta-server-root-ca-cert", default_value_t)]
     pub rpc_tls_meta_server_root_ca_cert: String,
@@ -848,6 +900,7 @@ impl TryInto<InnerMetaConfig> for MetaConfig {
             username: self.username,
             password: self.password,
             client_timeout_in_second: self.client_timeout_in_second,
+            auto_sync_interval: self.auto_sync_interval,
             rpc_tls_meta_server_root_ca_cert: self.rpc_tls_meta_server_root_ca_cert,
             rpc_tls_meta_service_domain_name: self.rpc_tls_meta_service_domain_name,
         })
@@ -863,6 +916,7 @@ impl From<InnerMetaConfig> for MetaConfig {
             username: inner.username,
             password: inner.password,
             client_timeout_in_second: inner.client_timeout_in_second,
+            auto_sync_interval: inner.auto_sync_interval,
             rpc_tls_meta_server_root_ca_cert: inner.rpc_tls_meta_server_root_ca_cert,
             rpc_tls_meta_service_domain_name: inner.rpc_tls_meta_service_domain_name,
         }
@@ -878,6 +932,7 @@ impl Debug for MetaConfig {
             .field("password", &mask_string(&self.password, 3))
             .field("embedded_dir", &self.embedded_dir)
             .field("client_timeout_in_second", &self.client_timeout_in_second)
+            .field("auto_sync_interval", &self.auto_sync_interval)
             .field(
                 "rpc_tls_meta_server_root_ca_cert",
                 &self.rpc_tls_meta_server_root_ca_cert,

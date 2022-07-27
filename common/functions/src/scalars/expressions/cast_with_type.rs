@@ -14,12 +14,13 @@
 
 use std::sync::Arc;
 
-use common_arrow::arrow::array::ArrayRef;
 use common_arrow::arrow::bitmap::Bitmap;
 use common_arrow::arrow::bitmap::MutableBitmap;
 use common_arrow::arrow::compute::cast;
 use common_arrow::arrow::compute::cast::CastOptions as ArrowOption;
+use common_arrow::ArrayRef;
 use common_datavalues::prelude::*;
+use common_datavalues::with_match_primitive_type_id;
 use common_exception::ErrorCode;
 use common_exception::Result;
 use common_io::prelude::FormatSettings;
@@ -173,7 +174,9 @@ pub fn cast_with_type(
         for x in viewer {
             check_timestamp(x)?;
         }
-    } else if nonull_data_type.data_type_id() == TypeID::Array {
+    } else if nonull_data_type.data_type_id() == TypeID::Array
+        || nonull_data_type.data_type_id() == TypeID::Struct
+    {
         return Err(ErrorCode::BadDataValueType(format!(
             "Cast error happens in casting from {} to {}",
             from_type.name(),
@@ -188,11 +191,11 @@ pub fn cast_with_type(
     }
 
     if let Some(bitmap) = bitmap {
-        let null_cnt = bitmap.null_count();
+        let null_cnt = bitmap.unset_bits();
         let source_null_cnt = match (all_nulls, source_valids) {
             (true, _) => column.len(),
             (false, None) => 0,
-            (false, Some(b)) => b.null_count(),
+            (false, Some(b)) => b.unset_bits(),
         };
 
         if cast_options.exception_mode == ExceptionMode::Throw
@@ -233,9 +236,9 @@ pub fn cast_to_variant(
     }
     let mut builder = ColumnBuilder::<VariantValue>::with_capacity(size);
     if from_type.data_type_id().is_numeric() || from_type.data_type_id() == TypeID::Boolean {
-        let serializer = from_type.create_serializer();
+        let serializer = from_type.create_serializer(&column)?;
         let format = FormatSettings::default();
-        match serializer.serialize_json_object(&column, None, &format) {
+        match serializer.serialize_json_object(None, &format) {
             Ok(values) => {
                 for v in values {
                     builder.append(&VariantValue::from(v));
@@ -246,10 +249,56 @@ pub fn cast_to_variant(
         return Ok((builder.build(size), None));
     }
     // other data types can't automatically casted to variant
-    return Err(ErrorCode::BadDataValueType(format!(
+    Err(ErrorCode::BadDataValueType(format!(
         "Expression type does not match column data type, expecting VARIANT but got {}",
         from_type.data_type_id()
-    )));
+    )))
+}
+
+pub fn cast_to_timestamp(
+    column: &ColumnRef,
+    from_type: &DataTypeImpl,
+) -> Result<(ColumnRef, Option<Bitmap>)> {
+    let column = Series::remove_nullable(column);
+    let size = column.len();
+    let mut builder = ColumnBuilder::<i64>::with_capacity(size);
+
+    with_match_primitive_type_id!(from_type.data_type_id(), |$T| {
+        let col: &PrimitiveColumn<$T> = Series::check_get(&column)?;
+        for v in col.iter() {
+            // The value is treated as a number of seconds, milliseconds or microseconds
+            // depending on the size of the numbers.
+            // If the value is less than 31536000000, it is treated as a number of seconds,
+            // If the value is greater than or equal to 31536000000 and less than 31536000000000,
+            // it is treated as milliseconds.
+            // If the value is greater than or equal to 31536000000000, it is treated as microseconds.
+            let val = *v as i64;
+            if val < 31536000000 {
+                builder.append(val * 1000000);
+            } else if val < 31536000000000 {
+                builder.append(val * 1000);
+            } else {
+                builder.append(val);
+            }
+        }
+    }, {
+        if from_type.data_type_id() == TypeID::Boolean {
+            let col: &BooleanColumn = Series::check_get(&column)?;
+            for v in col.iter() {
+                if v {
+                    builder.append(1i64);
+                } else {
+                    builder.append(0i64);
+                }
+            }
+        } else {
+            return Err(ErrorCode::BadDataValueType(format!(
+                "Cast error happens in casting from {} to Timestamp.",
+                from_type.data_type_id()
+            )));
+        }
+    });
+    return Ok((builder.build(size), None));
 }
 
 // cast using arrow's cast compute
@@ -262,12 +311,14 @@ pub fn arrow_cast_compute(
 ) -> Result<(ColumnRef, Option<Bitmap>)> {
     if data_type.data_type_id().is_variant() {
         return cast_to_variant(column, from_type, data_type, func_ctx);
+    } else if data_type.data_type_id() == TypeID::Timestamp {
+        return cast_to_timestamp(column, from_type);
     }
 
     let arrow_array = column.as_arrow_array();
     let arrow_options = cast_options.as_arrow();
-    let result = cast::cast(arrow_array.as_ref(), &data_type.arrow_type(), arrow_options)?;
-    let result: ArrayRef = Arc::from(result);
+    let result: ArrayRef =
+        cast::cast(arrow_array.as_ref(), &data_type.arrow_type(), arrow_options)?;
     let bitmap = result.validity().cloned();
     Ok((result.into_column(), bitmap))
 }

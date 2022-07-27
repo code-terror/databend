@@ -4,18 +4,25 @@ DROP TABLE IF EXISTS t3;
 DROP TABLE IF EXISTS t4;
 
 CREATE TABLE t(c1 int) ENGINE = Null;
-SELECT COUNT(1) from system.tables where name = 't' and database = 'default';
+
+-- As part of the functionality of time travel, system.tables now
+-- - contains dropped-tables
+-- - has an extra column `dropped_on`
+-- it is NOT backward compatible.
+--
+-- The following case is moved to 20_005_system_tables_with_dropped
+--SELECT COUNT(1) from system.tables where name = 't' and database = 'default' and dropped_on = 'NULL';
 
 CREATE TABLE IF NOT EXISTS t(c1 int) ENGINE = Null;
 CREATE TABLE t(c1 int) ENGINE = Null; -- {ErrorCode 2302}
 
 
-create table t2(a int,b int) engine=Memory;
+create table t2(a int,b int) Engine = Fuse;
 insert into t2 values(1,1),(2,2);
 select a+b from t2;
 
-create table t2(a int,b int) engine=Memory; -- {ErrorCode 2302}
-create table t2(a int,b int) engine=Memory; -- {ErrorCode 2302}
+create table t2(a int,b int) Engine = Fuse; -- {ErrorCode 2302}
+create table t2(a int,b int) Engine = Fuse; -- {ErrorCode 2302}
 create table t2(a INT auto_increment); -- {ErrorCode 1022}
 
 create table t3(a int,b int) engine=Memory CLUSTER BY(a); -- {ErrorCode 2703}
@@ -30,9 +37,11 @@ DROP TABLE IF EXISTS t3;
 DROP TABLE IF EXISTS t4;
 
 -- prepare test databases for testing 'create table like' and 'as select' statements.
+DROP DATABASE IF EXISTS db1;
+DROP DATABASE IF EXISTS db2;
 CREATE DATABASE db1;
 CREATE DATABASE db2;
-CREATE TABLE db1.test1(a INT, b INT null) ENGINE=memory;
+CREATE TABLE db1.test1(a INT, b INT null) Engine = Fuse;
 INSERT INTO db1.test1 VALUES (1, 2), (2, 3), (3, 4);
 
 SELECT '====BEGIN TEST CREATE TABLE LIKE STATEMENT====';
@@ -67,6 +76,9 @@ SELECT '====CREATE ALL DATA TYPE TABLE====';
 create table db2.test7(tiny TINYINT, tiny_unsigned TINYINT UNSIGNED, smallint SMALLINT, smallint_unsigned SMALLINT UNSIGNED, int INT, int_unsigned INT UNSIGNED, bigint BIGINT, bigint_unsigned BIGINT UNSIGNED,float FLOAT, double DOUBLE, date DATE, datetime DATETIME, ts TIMESTAMP, str VARCHAR default '3', bool BOOLEAN, arr ARRAY, obj OBJECT, variant VARIANT);
 desc db2.test7;
 
+SELECT '====CREATE TRANSIENT TABLE====';
+create transient table db2.test8(tiny TINYINT, tiny_unsigned TINYINT UNSIGNED, smallint SMALLINT, smallint_unsigned SMALLINT UNSIGNED, int INT, int_unsigned INT UNSIGNED, bigint BIGINT, bigint_unsigned BIGINT UNSIGNED,float FLOAT, double DOUBLE, date DATE, datetime DATETIME, ts TIMESTAMP, str VARCHAR default '3', bool BOOLEAN, arr ARRAY, obj OBJECT, variant VARIANT);
+desc db2.test8;
 
 -- clean up test databases
 DROP DATABASE db1;

@@ -16,8 +16,6 @@ use std::convert::TryInto;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use common_arrow::arrow::io::flight::serialize_schema;
-use common_arrow::arrow::io::ipc::write::default_ipc_fields;
 use common_arrow::arrow_format::flight::data::Action;
 use common_arrow::arrow_format::flight::data::ActionType;
 use common_arrow::arrow_format::flight::data::Criteria;
@@ -40,29 +38,19 @@ use tonic::Status;
 use tonic::Streaming;
 
 use crate::api::rpc::flight_actions::FlightAction;
-use crate::api::rpc::flight_dispatcher::DatabendQueryFlightDispatcher;
-use crate::api::rpc::flight_dispatcher::DatabendQueryFlightDispatcherRef;
-use crate::api::rpc::flight_service_stream::FlightDataStream;
-use crate::api::rpc::flight_tickets::FlightTicket;
 use crate::sessions::SessionManager;
+use crate::sessions::SessionType;
 
 pub type FlightStream<T> =
     Pin<Box<dyn Stream<Item = Result<T, tonic::Status>> + Send + Sync + 'static>>;
 
 pub struct DatabendQueryFlightService {
     sessions: Arc<SessionManager>,
-    dispatcher: Arc<DatabendQueryFlightDispatcher>,
 }
 
 impl DatabendQueryFlightService {
-    pub fn create(
-        dispatcher: DatabendQueryFlightDispatcherRef,
-        sessions: Arc<SessionManager>,
-    ) -> Self {
-        DatabendQueryFlightService {
-            sessions,
-            dispatcher,
-        }
+    pub fn create(sessions: Arc<SessionManager>) -> Self {
+        DatabendQueryFlightService { sessions }
     }
 }
 
@@ -101,36 +89,75 @@ impl FlightService for DatabendQueryFlightService {
 
     type DoGetStream = FlightStream<FlightData>;
 
-    #[tracing::instrument(level = "debug", skip_all)]
-    async fn do_get(&self, request: Request<Ticket>) -> Response<Self::DoGetStream> {
-        common_tracing::extract_remote_span_as_parent(&request);
-        let ticket: FlightTicket = request.into_inner().try_into()?;
-
-        match ticket {
-            FlightTicket::StreamTicket(steam_ticket) => {
-                let (receiver, data_schema) = self.dispatcher.get_stream(&steam_ticket)?;
-                let arrow_schema = data_schema.to_arrow();
-                let ipc_fields = default_ipc_fields(&arrow_schema.fields);
-
-                serialize_schema(&arrow_schema, Some(&ipc_fields));
-
-                Ok(RawResponse::new(
-                    Box::pin(FlightDataStream::create(receiver, ipc_fields))
-                        as FlightStream<FlightData>,
-                ))
-            }
-        }
-    }
-
     type DoPutStream = FlightStream<PutResult>;
 
-    async fn do_put(&self, _: StreamReq<FlightData>) -> Response<Self::DoPutStream> {
-        Result::Err(Status::unimplemented(
-            "DatabendQuery does not implement do_put.",
-        ))
+    async fn do_put(&self, req: StreamReq<FlightData>) -> Response<Self::DoPutStream> {
+        // TODO: panic hook?
+        let query_id = match req.metadata().get("x-query-id") {
+            None => Err(Status::invalid_argument(
+                "Must be send X-Query-ID metadata.",
+            )),
+            Some(metadata_value) => match metadata_value.to_str() {
+                Ok(query_id) if !query_id.is_empty() => Ok(query_id.to_string()),
+                Ok(_query_id) => Err(Status::invalid_argument("x-query-id metadata is empty.")),
+                Err(cause) => Err(Status::invalid_argument(format!(
+                    "Cannot parse X-Query-ID metadata value, cause: {:?}",
+                    cause
+                ))),
+            },
+        }?;
+
+        let source = match req.metadata().get("x-source") {
+            None => Err(Status::invalid_argument("Must be send x-source metadata.")),
+            Some(metadata_value) => match metadata_value.to_str() {
+                Ok(source) if !source.is_empty() => Ok(source.to_string()),
+                Ok(_source) => Err(Status::invalid_argument("x-source metadata is empty.")),
+                Err(cause) => Err(Status::invalid_argument(format!(
+                    "Cannot parse x-source metadata value, cause: {:?}",
+                    cause
+                ))),
+            },
+        }?;
+
+        let stream = req.into_inner();
+        let exchange_manager = self.sessions.get_data_exchange_manager();
+        let join_handler = exchange_manager
+            .handle_do_put(&query_id, &source, stream)
+            .await?;
+
+        if let Err(cause) = join_handler.await {
+            if !cause.is_panic() {
+                println!("Put stream is canceled {:?}", cause);
+                return Err(Status::internal(format!(
+                    "Put stream is canceled. {:?}",
+                    cause
+                )));
+            }
+
+            if cause.is_panic() {
+                let panic_error = cause.into_panic();
+
+                if let Some(message) = panic_error.downcast_ref::<&'static str>() {
+                    return Err(Status::internal(format!("Put stream panic, {}", message)));
+                }
+
+                if let Some(message) = panic_error.downcast_ref::<String>() {
+                    return Err(Status::internal(format!("Put stream panic, {}", message)));
+                }
+            }
+        }
+
+        Ok(RawResponse::new(Box::pin(tokio_stream::once(Ok(PutResult {
+            app_metadata: vec![],
+        }))) as FlightStream<PutResult>))
     }
 
     type DoExchangeStream = FlightStream<FlightData>;
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn do_get(&self, _request: Request<Ticket>) -> Response<Self::DoGetStream> {
+        Err(Status::unimplemented("unimplement do_get"))
+    }
 
     async fn do_exchange(&self, _: StreamReq<FlightData>) -> Response<Self::DoExchangeStream> {
         Result::Err(Status::unimplemented(
@@ -158,30 +185,25 @@ impl FlightService for DatabendQueryFlightService {
 
                 FlightResult { body: vec![] }
             }
-            FlightAction::BroadcastAction(action) => {
-                let session_id = action.query_id.clone();
-                let is_aborted = self.dispatcher.is_aborted();
-                let session = self
-                    .sessions
-                    .create_rpc_session(session_id, is_aborted)
-                    .await?;
-
-                self.dispatcher
-                    .broadcast_action(session, flight_action)
+            FlightAction::InitQueryFragmentsPlan(init_query_fragments_plan) => {
+                let session = self.sessions.create_session(SessionType::FlightRPC).await?;
+                let ctx = session.create_query_context().await?;
+                let exchange_manager = self.sessions.get_data_exchange_manager();
+                exchange_manager
+                    .init_query_fragments_plan(&ctx, &init_query_fragments_plan.executor_packet)?;
+                FlightResult { body: vec![] }
+            }
+            FlightAction::InitNodesChannel(init_nodes_channel) => {
+                let publisher_packet = &init_nodes_channel.init_nodes_channel_packet;
+                let exchange_manager = self.sessions.get_data_exchange_manager();
+                exchange_manager
+                    .init_nodes_channel(publisher_packet)
                     .await?;
                 FlightResult { body: vec![] }
             }
-            FlightAction::PrepareShuffleAction(action) => {
-                let session_id = action.query_id.clone();
-                let is_aborted = self.dispatcher.is_aborted();
-                let session = self
-                    .sessions
-                    .create_rpc_session(session_id, is_aborted)
-                    .await?;
-
-                self.dispatcher
-                    .shuffle_action(session, flight_action)
-                    .await?;
+            FlightAction::ExecutePartialQuery(query_id) => {
+                let exchange_manager = self.sessions.get_data_exchange_manager();
+                exchange_manager.execute_partial_query(query_id)?;
                 FlightResult { body: vec![] }
             }
         };

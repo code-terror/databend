@@ -14,15 +14,16 @@
 
 use common_meta_raft_store::config::RaftConfig;
 use common_meta_types::MetaResult;
+use common_meta_types::Node;
 
 use super::outer_v0::Config as OuterV0Config;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Config {
+    pub cmd: String,
     pub config_file: String,
     pub log_level: String,
     pub log_dir: String,
-    pub metric_api_address: String,
     pub admin_api_address: String,
     pub admin_tls_server_cert: String,
     pub admin_tls_server_key: String,
@@ -36,10 +37,10 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            cmd: "".to_string(),
             config_file: "".to_string(),
             log_level: "INFO".to_string(),
             log_dir: "./.databend/logs".to_string(),
-            metric_api_address: "127.0.0.1:28001".to_string(),
             admin_api_address: "127.0.0.1:28002".to_string(),
             admin_tls_server_cert: "".to_string(),
             admin_tls_server_key: "".to_string(),
@@ -56,7 +57,7 @@ impl Config {
     ///
     /// In the future, we could have `ConfigV1` and `ConfigV2`.
     pub fn load() -> MetaResult<Self> {
-        let cfg = OuterV0Config::load()?.try_into()?;
+        let cfg = OuterV0Config::load()?.into();
 
         Ok(cfg)
     }
@@ -72,6 +73,15 @@ impl Config {
     /// - tests
     pub fn into_outer(self) -> OuterV0Config {
         OuterV0Config::from(self)
+    }
+
+    /// Create `Node` from config
+    pub fn get_node(&self) -> Node {
+        Node {
+            name: self.raft_config.id.to_string(),
+            endpoint: self.raft_config.raft_api_advertise_host_endpoint(),
+            grpc_api_addr: Some(self.grpc_api_address.clone()),
+        }
     }
 
     pub fn tls_rpc_server_enabled(&self) -> bool {

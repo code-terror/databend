@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 use once_cell::sync::Lazy;
+use semver::Version;
 
 pub static DATABEND_COMMIT_VERSION: Lazy<String> = Lazy::new(|| {
     let git_tag = option_env!("VERGEN_GIT_SEMVER");
@@ -19,7 +20,7 @@ pub static DATABEND_COMMIT_VERSION: Lazy<String> = Lazy::new(|| {
     let rustc_semver = option_env!("VERGEN_RUSTC_SEMVER");
     let timestamp = option_env!("VERGEN_BUILD_TIMESTAMP");
 
-    let ver = match (git_tag, git_sha, rustc_semver, timestamp) {
+    match (git_tag, git_sha, rustc_semver, timestamp) {
         #[cfg(not(feature = "simd"))]
         (Some(v1), Some(v2), Some(v3), Some(v4)) => format!("{}-{}(rust-{}-{})", v1, v2, v3, v4),
         #[cfg(feature = "simd")]
@@ -27,6 +28,15 @@ pub static DATABEND_COMMIT_VERSION: Lazy<String> = Lazy::new(|| {
             format!("{}-{}-simd(rust-{}-{})", v1, v2, v3, v4)
         }
         _ => String::new(),
-    };
-    ver
+    }
+});
+
+pub static QUERY_SEMVER: Lazy<Version> = Lazy::new(|| {
+    //
+    let build_semver = option_env!("VERGEN_GIT_SEMVER");
+    let semver = build_semver.expect("VERGEN_GIT_SEMVER can not be None");
+
+    let semver = semver.strip_prefix('v').unwrap_or(semver);
+
+    Version::parse(semver).unwrap_or_else(|e| panic!("Invalid semver: {:?}: {}", semver, e))
 });

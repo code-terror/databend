@@ -28,7 +28,7 @@ use crate::sessions::QueryContext;
 use crate::sql::statements::AnalyzableStatement;
 use crate::sql::statements::AnalyzedResult;
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DfAuthOption {
     pub auth_type: Option<String>,
     pub by_value: Option<String>,
@@ -43,7 +43,7 @@ impl DfAuthOption {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DfUserWithOption {
     TenantSetting,
     NoTenantSetting,
@@ -84,7 +84,7 @@ impl DfUserWithOption {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DfCreateUser {
     pub if_not_exists: bool,
     pub user: UserIdentity,
@@ -108,6 +108,7 @@ impl AnalyzableStatement for DfCreateUser {
                     &self.auth_option.by_value,
                 )?,
                 user_option,
+                if_not_exists: self.if_not_exists,
             },
         ))))
     }

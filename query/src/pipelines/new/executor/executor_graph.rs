@@ -17,6 +17,7 @@ use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::sync::Arc;
 
+use common_exception::ErrorCode;
 use common_exception::Result;
 use common_tracing::tracing;
 use petgraph::dot::Config;
@@ -90,9 +91,22 @@ type StateLockGuard = ExecutingGraph;
 
 impl ExecutingGraph {
     pub fn create(pipeline: NewPipeline) -> Result<ExecutingGraph> {
-        // let (nodes_size, edges_size) = pipeline.graph_size();
+        let mut graph = StableGraph::new();
+        Self::init_graph(&pipeline, &mut graph);
+        Ok(ExecutingGraph { graph })
+    }
+
+    pub fn from_pipelines(pipelines: Vec<NewPipeline>) -> Result<ExecutingGraph> {
         let mut graph = StableGraph::new();
 
+        for pipeline in &pipelines {
+            Self::init_graph(pipeline, &mut graph);
+        }
+
+        Ok(ExecutingGraph { graph })
+    }
+
+    fn init_graph(pipeline: &NewPipeline, graph: &mut StableGraph<Arc<Node>, ()>) {
         let mut node_stack = Vec::new();
         let mut edge_stack: Vec<Arc<OutputPort>> = Vec::new();
         for query_pipe in &pipeline.pipes {
@@ -179,7 +193,6 @@ impl ExecutingGraph {
 
         // Assert no output.
         assert_eq!(node_stack.len(), 0);
-        Ok(ExecutingGraph { graph })
     }
 
     /// # Safety
@@ -230,7 +243,7 @@ impl ExecutingGraph {
                     state_guard_cache = Some(node.state.lock().unwrap());
                 }
 
-                *state_guard_cache.unwrap() = match node.processor.event()? {
+                let processor_state = match node.processor.event()? {
                     Event::Finished => State::Finished,
                     Event::NeedData | Event::NeedConsume => State::Idle,
                     Event::Sync => {
@@ -244,6 +257,7 @@ impl ExecutingGraph {
                 };
 
                 node.trigger(&mut need_schedule_edges);
+                *state_guard_cache.unwrap() = processor_state;
             }
         }
 
@@ -332,6 +346,12 @@ impl RunningGraph {
         Ok(RunningGraph(graph_state))
     }
 
+    pub fn from_pipelines(pipelines: Vec<NewPipeline>) -> Result<RunningGraph> {
+        let graph_state = ExecutingGraph::from_pipelines(pipelines)?;
+        tracing::debug!("Create running graph:{:?}", graph_state);
+        Ok(RunningGraph(graph_state))
+    }
+
     /// # Safety
     ///
     /// Method is thread unsafe and require thread safe call
@@ -346,6 +366,26 @@ impl RunningGraph {
         let mut schedule_queue = ScheduleQueue::create();
         ExecutingGraph::schedule_queue(&self.0, node_index, &mut schedule_queue)?;
         Ok(schedule_queue)
+    }
+
+    pub fn check_finished(&self) -> Result<()> {
+        let mut unfinished_nodes = vec![];
+        for node_index in self.0.graph.node_indices() {
+            let state = self.0.graph[node_index].state.lock().unwrap();
+            if !matches!(&*state, State::Finished) {
+                unfinished_nodes.push(node_index);
+            }
+        }
+
+        if !unfinished_nodes.is_empty() {
+            return Err(ErrorCode::IllegalPipelineState(format!(
+                "Pipeline is unfinished. unfinished nodes id {:?}, graph: {:?}",
+                unfinished_nodes,
+                Dot::with_config(&self.0.graph, &[Config::EdgeNoLabel])
+            )));
+        }
+
+        Ok(())
     }
 }
 

@@ -23,7 +23,6 @@ use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
 
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::sessions::QueryContext;
 
 pub struct ShowCreateDatabaseInterpreter {
@@ -32,11 +31,8 @@ pub struct ShowCreateDatabaseInterpreter {
 }
 
 impl ShowCreateDatabaseInterpreter {
-    pub fn try_create(
-        ctx: Arc<QueryContext>,
-        plan: ShowCreateDatabasePlan,
-    ) -> Result<InterpreterPtr> {
-        Ok(Arc::new(ShowCreateDatabaseInterpreter { ctx, plan }))
+    pub fn try_create(ctx: Arc<QueryContext>, plan: ShowCreateDatabasePlan) -> Result<Self> {
+        Ok(ShowCreateDatabaseInterpreter { ctx, plan })
     }
 }
 
@@ -52,7 +48,9 @@ impl Interpreter for ShowCreateDatabaseInterpreter {
     ) -> Result<SendableDataBlockStream> {
         let tenant = self.ctx.get_tenant();
         let calalog = self.ctx.get_catalog(&self.plan.catalog)?;
-        let db = calalog.get_database(tenant.as_str(), &self.plan.db).await?;
+        let db = calalog
+            .get_database(tenant.as_str(), &self.plan.database)
+            .await?;
         let name = db.name();
         let mut info = format!("CREATE DATABASE `{}`", name);
         if !db.engine().is_empty() {

@@ -15,6 +15,8 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::Ordering::Acquire;
 use std::sync::Arc;
@@ -25,8 +27,6 @@ use common_base::base::Progress;
 use common_base::base::ProgressValues;
 use common_base::base::Runtime;
 use common_base::base::TrySpawn;
-use common_base::infallible::Mutex;
-use common_base::infallible::RwLock;
 use common_contexts::DalContext;
 use common_contexts::DalMetrics;
 use common_datablocks::DataBlock;
@@ -34,7 +34,7 @@ use common_exception::ErrorCode;
 use common_exception::Result;
 use common_functions::scalars::FunctionContext;
 use common_io::prelude::FormatSettings;
-use common_meta_types::TableInfo;
+use common_meta_app::schema::TableInfo;
 use common_meta_types::UserInfo;
 use common_planners::Expression;
 use common_planners::PartInfoPtr;
@@ -47,8 +47,15 @@ use common_planners::Statistics;
 use common_streams::AbortStream;
 use common_streams::SendableDataBlockStream;
 use common_tracing::tracing;
+use common_users::RoleCacheMgr;
+use common_users::UserApiProvider;
+use futures::future::AbortHandle;
 use opendal::Operator;
+use parking_lot::Mutex;
+use parking_lot::RwLock;
 
+use crate::api::DataExchangeManager;
+use crate::auth::AuthMgr;
 use crate::catalogs::Catalog;
 use crate::catalogs::CatalogManager;
 use crate::clusters::Cluster;
@@ -61,9 +68,6 @@ use crate::sessions::Settings;
 use crate::storages::cache::CacheManager;
 use crate::storages::stage::StageTable;
 use crate::storages::Table;
-use crate::users::auth::auth_mgr::AuthMgr;
-use crate::users::RoleCacheMgr;
-use crate::users::UserApiProvider;
 use crate::Config;
 
 #[derive(Clone)]
@@ -73,6 +77,7 @@ pub struct QueryContext {
     partition_queue: Arc<RwLock<VecDeque<PartInfoPtr>>>,
     shared: Arc<QueryContextShared>,
     precommit_blocks: Arc<RwLock<Vec<DataBlock>>>,
+    fragment_id: Arc<AtomicUsize>,
 }
 
 impl QueryContext {
@@ -91,6 +96,7 @@ impl QueryContext {
             version: format!("DatabendQuery {}", *crate::version::DATABEND_COMMIT_VERSION),
             shared,
             precommit_blocks: Arc::new(RwLock::new(Vec::new())),
+            fragment_id: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -220,6 +226,10 @@ impl QueryContext {
         self.shared.attach_http_query_handle(handle);
     }
 
+    pub fn get_http_query(&self) -> Option<HttpQueryHandle> {
+        self.shared.get_http_query()
+    }
+
     pub fn attach_query_str(&self, query: &str) {
         self.shared.attach_query_str(query);
     }
@@ -230,6 +240,10 @@ impl QueryContext {
 
     pub fn get_cluster(&self) -> Arc<Cluster> {
         self.shared.get_cluster()
+    }
+
+    pub fn get_fragment_id(&self) -> usize {
+        self.fragment_id.fetch_add(1, Ordering::Release)
     }
 
     pub fn get_catalogs(&self) -> Arc<CatalogManager> {
@@ -268,6 +282,10 @@ impl QueryContext {
         Ok(abort_stream)
     }
 
+    pub fn add_source_abort_handle(&self, abort_handle: AbortHandle) {
+        self.shared.add_source_abort_handle(abort_handle);
+    }
+
     pub fn get_current_catalog(&self) -> String {
         self.shared.get_current_catalog()
     }
@@ -299,12 +317,24 @@ impl QueryContext {
         self.shared.get_current_user()
     }
 
+    pub fn set_current_user(&self, user: UserInfo) {
+        self.shared.set_current_user(user)
+    }
+
     pub fn get_fuse_version(&self) -> String {
         self.version.clone()
     }
 
     pub fn get_settings(&self) -> Arc<Settings> {
         self.shared.get_settings()
+    }
+
+    pub fn get_changed_settings(&self) -> Arc<Settings> {
+        self.shared.get_changed_settings()
+    }
+
+    pub fn apply_changed_settings(&self, changed_settings: Arc<Settings>) -> Result<()> {
+        self.shared.apply_changed_settings(changed_settings)
     }
 
     pub fn get_format_settings(&self) -> Result<FormatSettings> {
@@ -317,6 +347,10 @@ impl QueryContext {
 
     pub fn get_tenant(&self) -> String {
         self.shared.get_tenant()
+    }
+
+    pub fn set_current_tenant(&self, tenant: String) {
+        self.shared.set_current_tenant(tenant)
     }
 
     pub fn get_subquery_name(&self, _query: &PlanNode) -> String {
@@ -415,6 +449,9 @@ impl QueryContext {
         self.shared.session.session_mgr.get_query_logger()
     }
 
+    pub fn get_exchange_manager(&self) -> Arc<DataExchangeManager> {
+        self.shared.session.session_mgr.get_data_exchange_manager()
+    }
     pub fn push_precommit_block(&self, block: DataBlock) {
         let mut blocks = self.precommit_blocks.write();
         blocks.push(block);
@@ -422,9 +459,10 @@ impl QueryContext {
 
     pub fn consume_precommit_blocks(&self) -> Vec<DataBlock> {
         let mut blocks = self.precommit_blocks.write();
-        let result = blocks.clone();
-        blocks.clear();
-        result
+
+        let mut swaped_precommit_blocks = vec![];
+        std::mem::swap(&mut *blocks, &mut swaped_precommit_blocks);
+        swaped_precommit_blocks
     }
 
     pub fn try_get_function_context(&self) -> Result<FunctionContext> {
@@ -439,6 +477,10 @@ impl QueryContext {
 
     pub fn get_connection_id(&self) -> String {
         self.shared.get_connection_id()
+    }
+
+    pub fn query_need_abort(self: &Arc<Self>) -> Arc<AtomicBool> {
+        self.shared.query_need_abort()
     }
 }
 

@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_base::base::ProgressValues;
+use std::str::FromStr;
+
 use common_datavalues::DataSchemaRef;
 use common_exception::ErrorCode;
-use common_io::prelude::FormatSettings;
+use common_formats::output_format::OutputFormatType;
 use common_tracing::tracing;
+use poem::error::BadRequest;
 use poem::error::Error as PoemError;
 use poem::error::InternalServerError;
 use poem::error::NotFound;
@@ -26,6 +28,7 @@ use poem::http::StatusCode;
 use poem::post;
 use poem::web::Json;
 use poem::web::Path;
+use poem::web::Query;
 use poem::Body;
 use poem::IntoResponse;
 use poem::Route;
@@ -36,7 +39,7 @@ use serde_json::Value as JsonValue;
 use super::query::ExecuteStateKind;
 use super::query::HttpQueryRequest;
 use super::query::HttpQueryResponseInternal;
-use crate::formats::output_format::OutputFormatType;
+use crate::servers::http::v1::query::Progresses;
 use crate::servers::http::v1::HttpQueryContext;
 use crate::servers::http::v1::JsonBlock;
 use crate::sessions::SessionType;
@@ -75,7 +78,8 @@ impl QueryError {
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct QueryStats {
-    pub scan_progress: Option<ProgressValues>,
+    #[serde(flatten)]
+    pub progresses: Progresses,
     pub running_time_ms: f64,
 }
 
@@ -108,7 +112,7 @@ impl QueryResponse {
         let schema = data.schema().clone();
         let session_id = r.session_id.clone();
         let stats = QueryStats {
-            scan_progress: state.scan_progress.clone(),
+            progresses: state.progresses.clone(),
             running_time_ms: state.running_time_ms,
         };
         QueryResponse {
@@ -198,11 +202,9 @@ async fn query_page_handler(
     let http_query_manager = ctx.session_mgr.get_http_query_manager();
     match http_query_manager.get_query(&query_id).await {
         Some(query) => {
-            // TODO(veeupup): get query_ctx here to get format_settings
-            let format = FormatSettings::default();
             query.clear_expire_time().await;
             let resp = query
-                .get_response_page(page_no, &format)
+                .get_response_page(page_no)
                 .await
                 .map_err(|err| poem::Error::from_string(err.message(), StatusCode::NOT_FOUND))?;
             query.update_expire_time().await;
@@ -221,12 +223,10 @@ pub(crate) async fn query_handler(
     let http_query_manager = ctx.session_mgr.get_http_query_manager();
     let query = http_query_manager.try_create_query(ctx, req).await;
 
-    // TODO(veeupup): get global query_ctx's format_settings, because we cann't set session settings now
-    let format = FormatSettings::default();
     match query {
         Ok(query) => {
             let resp = query
-                .get_response_page(0, &format)
+                .get_response_page(0)
                 .await
                 .map_err(|err| poem::Error::from_string(err.message(), StatusCode::NOT_FOUND))?;
             query.update_expire_time().await;
@@ -266,12 +266,22 @@ fn query_id_not_found(query_id: String) -> PoemError {
     )
 }
 
+#[derive(Deserialize)]
+struct DownloadHandlerParams {
+    pub format: Option<String>,
+    pub limit: Option<usize>,
+}
+
 #[poem::handler]
 async fn result_download_handler(
     ctx: &HttpQueryContext,
     Path(query_id): Path<String>,
+    Query(params): Query<DownloadHandlerParams>,
 ) -> PoemResult<Body> {
+    let default_format = "csv".to_string();
     let session = ctx.get_session(SessionType::HTTPQuery);
+    let format =
+        OutputFormatType::from_str(&params.format.unwrap_or(default_format)).map_err(BadRequest)?;
 
     let ctx = session
         .create_query_context()
@@ -289,7 +299,7 @@ async fn result_download_handler(
         })?;
 
     let stream = result_table
-        .download(ctx, OutputFormatType::Tsv)
+        .download(ctx, format, params.limit)
         .await
         .map_err(InternalServerError)?;
 

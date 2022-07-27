@@ -88,8 +88,8 @@ impl From<std::num::TryFromIntError> for ErrorCode {
     }
 }
 
-impl From<common_arrow::arrow::error::ArrowError> for ErrorCode {
-    fn from(error: common_arrow::arrow::error::ArrowError) -> Self {
+impl From<common_arrow::arrow::error::Error> for ErrorCode {
+    fn from(error: common_arrow::arrow::error::Error) -> Self {
         ErrorCode::from_std_error(error)
     }
 }
@@ -159,7 +159,7 @@ impl From<octocrab::Error> for ErrorCode {
 }
 
 // ===  ser/de to/from tonic::Status ===
-#[derive(thiserror::Error, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+#[derive(thiserror::Error, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SerializedError {
     code: u16,
     message: String,

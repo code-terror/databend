@@ -4,20 +4,38 @@ import os
 
 from mysql_runner import TestMySQL
 from http_runner import TestHttp
+from clickhouse_runner import TestClickhouse
 
-from config import mysql_config, http_config
+from config import mysql_config, http_config, clickhouse_config
 
-if __name__ == '__main__':
+import fire
+
+
+def run(pattern=".*"):
+    """
+    Run tests
+    """
     disable_mysql_test = os.getenv("DISABLE_MYSQL_LOGIC_TEST")
     if disable_mysql_test is None:
-        mySQL = TestMySQL("mysql")
-        mySQL.set_driver(mysql_config)
-        mySQL.set_label("mysql")
-        mySQL.run_sql_suite()
+        mysql_test = TestMySQL("mysql", pattern)
+        mysql_test.set_driver(mysql_config)
+        mysql_test.set_label("mysql")
+        mysql_test.run_sql_suite()
 
     disable_http_test = os.getenv("DISABLE_HTTP_LOGIC_TEST")
     if disable_http_test is None:
-        http = TestHttp("http")
+        http = TestHttp("http", pattern)
         http.set_driver(http_config)
         http.set_label("http")
         http.run_sql_suite()
+
+    disable_ch_test = os.getenv("DISABLE_CLICKHOUSE_LOGIC_TEST")
+    if disable_ch_test is None:
+        http = TestClickhouse("clickhouse", pattern)
+        http.set_driver(clickhouse_config)
+        http.set_label("clickhouse")
+        http.run_sql_suite()
+
+
+if __name__ == '__main__':
+    fire.Fire(run)

@@ -27,7 +27,7 @@ use crate::sessions::QueryContext;
 use crate::sql::statements::AnalyzableStatement;
 use crate::sql::statements::AnalyzedResult;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DfSetVariable {
     pub local: bool,
     pub hivevar: bool,
@@ -56,6 +56,7 @@ impl AnalyzableStatement for DfSetVariable {
 impl DfSetVariable {
     fn mapping_set_var(variable: String, value: &SetVariableValue) -> VarValue {
         VarValue {
+            is_global: false,
             variable,
             value: match value {
                 sqlparser::ast::SetVariableValue::Ident(v) => v.value.clone(),

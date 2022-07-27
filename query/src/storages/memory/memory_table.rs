@@ -18,18 +18,17 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use common_base::infallible::Mutex;
-use common_base::infallible::RwLock;
 use common_datablocks::DataBlock;
-use common_datavalues::ColumnRef;
 use common_exception::Result;
-use common_meta_types::TableInfo;
+use common_meta_app::schema::TableInfo;
 use common_planners::Extras;
 use common_planners::Partitions;
 use common_planners::ReadDataSourcePlan;
 use common_planners::Statistics;
 use common_planners::TruncateTablePlan;
 use common_streams::SendableDataBlockStream;
+use parking_lot::Mutex;
+use parking_lot::RwLock;
 
 use crate::pipelines::new::processors::port::InputPort;
 use crate::pipelines::new::processors::port::OutputPort;
@@ -43,7 +42,6 @@ use crate::pipelines::new::SinkPipeBuilder;
 use crate::pipelines::new::SourcePipeBuilder;
 use crate::sessions::QueryContext;
 use crate::storages::memory::memory_part::MemoryPartInfo;
-use crate::storages::memory::MemoryTableStream;
 use crate::storages::StorageContext;
 use crate::storages::StorageDescription;
 use crate::storages::Table;
@@ -180,38 +178,6 @@ impl Table for MemoryTable {
         Ok((statistics, parts))
     }
 
-    async fn read(
-        &self,
-        ctx: Arc<QueryContext>,
-        plan: &ReadDataSourcePlan,
-    ) -> Result<SendableDataBlockStream> {
-        let push_downs = &plan.push_downs;
-        let raw_blocks = self.blocks.read().clone();
-
-        let blocks = match push_downs {
-            Some(push_downs) => match &push_downs.projection {
-                Some(prj) => {
-                    let pruned_schema = Arc::new(self.table_info.schema().project(prj.clone()));
-                    let mut pruned_blocks = Vec::with_capacity(raw_blocks.len());
-
-                    for raw_block in raw_blocks {
-                        let raw_columns = raw_block.columns();
-                        let columns: Vec<ColumnRef> =
-                            prj.iter().map(|idx| raw_columns[*idx].clone()).collect();
-
-                        pruned_blocks.push(DataBlock::create(pruned_schema.clone(), columns))
-                    }
-
-                    pruned_blocks
-                }
-                None => raw_blocks,
-            },
-            None => raw_blocks,
-        };
-
-        Ok(Box::pin(MemoryTableStream::try_create(ctx, blocks)?))
-    }
-
     fn read2(
         &self,
         ctx: Arc<QueryContext>,
@@ -317,7 +283,7 @@ impl MemoryTableSource {
     fn projection(&self, data_block: DataBlock) -> Result<Option<DataBlock>> {
         if let Some(extras) = &self.extras {
             if let Some(projection) = &extras.projection {
-                let pruned_schema = data_block.schema().project(projection.clone());
+                let pruned_schema = data_block.schema().project(projection);
                 let raw_columns = data_block.columns();
                 let columns = projection
                     .iter()
@@ -344,7 +310,7 @@ impl SyncSource for MemoryTableSource {
     }
 }
 
-struct MemoryTableSink {
+pub struct MemoryTableSink {
     ctx: Arc<QueryContext>,
 }
 

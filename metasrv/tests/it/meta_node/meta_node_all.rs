@@ -31,6 +31,7 @@ use common_meta_types::LogEntry;
 use common_meta_types::MatchSeq;
 use common_meta_types::MetaError;
 use common_meta_types::MetaRaftError;
+use common_meta_types::Node;
 use common_meta_types::NodeId;
 use common_meta_types::Operation;
 use common_meta_types::RetryableError;
@@ -50,18 +51,15 @@ use pretty_assertions::assert_eq;
 use crate::init_meta_ut;
 use crate::tests::service::MetaSrvTestContext;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 5)]
+#[async_entry::test(worker_threads = 5, init = "init_meta_ut!()", tracing_span = "debug")]
 async fn test_meta_node_boot() -> anyhow::Result<()> {
     // - Start a single node meta service cluster.
     // - Test the single node is recorded by this cluster.
 
-    let (_log_guards, ut_span) = init_meta_ut!();
-    let _ent = ut_span.enter();
-
     let tc = MetaSrvTestContext::new(0);
     let addr = tc.config.raft_config.raft_api_advertise_host_endpoint();
 
-    let mn = MetaNode::boot(&tc.config.raft_config).await?;
+    let mn = MetaNode::boot(&tc.config).await?;
 
     let got = mn.get_node(&0).await?;
     assert_eq!(addr, got.unwrap().endpoint);
@@ -69,12 +67,9 @@ async fn test_meta_node_boot() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 5)]
+#[async_entry::test(worker_threads = 5, init = "init_meta_ut!()", tracing_span = "debug")]
 async fn test_meta_node_graceful_shutdown() -> anyhow::Result<()> {
     // - Start a leader then shutdown.
-
-    let (_log_guards, ut_span) = init_meta_ut!();
-    let _ent = ut_span.enter();
 
     let (_nid0, tc) = start_meta_node_leader().await?;
     let mn0 = tc.meta_node();
@@ -98,79 +93,63 @@ async fn test_meta_node_graceful_shutdown() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 5)]
+#[async_entry::test(worker_threads = 5, init = "init_meta_ut!()", tracing_span = "debug")]
 async fn test_meta_node_leader_and_non_voter() -> anyhow::Result<()> {
     // - Start a leader and a non-voter;
     // - Write to leader, check on non-voter.
 
-    let (_log_guards, ut_span) = init_meta_ut!();
-    let _ent = ut_span.enter();
+    let (_nid0, tc0) = start_meta_node_leader().await?;
+    let mn0 = tc0.meta_node();
 
-    {
-        let span = tracing::span!(tracing::Level::DEBUG, "test_meta_node_leader_and_non_voter");
-        let _ent = span.enter();
+    let (_nid1, tc1) = start_meta_node_non_voter(mn0.clone(), 1).await?;
+    let mn1 = tc1.meta_node();
 
-        let (_nid0, tc0) = start_meta_node_leader().await?;
-        let mn0 = tc0.meta_node();
-
-        let (_nid1, tc1) = start_meta_node_non_voter(mn0.clone(), 1).await?;
-        let mn1 = tc1.meta_node();
-
-        assert_upsert_kv_synced(vec![mn0.clone(), mn1.clone()], "metakey2").await?;
-    }
+    assert_upsert_kv_synced(vec![mn0.clone(), mn1.clone()], "metakey2").await?;
 
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 5)]
+#[async_entry::test(worker_threads = 5, init = "init_meta_ut!()", tracing_span = "debug")]
 async fn test_meta_node_write_to_local_leader() -> anyhow::Result<()> {
     // - Start a leader, 2 followers and a non-voter;
     // - Write to the raft node on the leader, expect Ok.
     // - Write to the raft node on the non-leader, expect ForwardToLeader error.
 
-    let (_log_guards, ut_span) = init_meta_ut!();
-    let _ent = ut_span.enter();
+    let (mut _nlog, tcs) = start_meta_node_cluster(btreeset![0, 1, 2], btreeset![3]).await?;
+    let all = test_context_nodes(&tcs);
 
-    {
-        let span = tracing::span!(tracing::Level::DEBUG, "test_meta_node_leader_and_non_voter");
-        let _ent = span.enter();
+    let leader_id = all[0].raft.metrics().borrow().current_leader.unwrap();
 
-        let (mut _nlog, tcs) = start_meta_node_cluster(btreeset![0, 1, 2], btreeset![3]).await?;
-        let all = test_context_nodes(&tcs);
+    // test writing to leader and non-leader
+    let key = "t-non-leader-write";
+    for id in 0u64..4 {
+        let mn = &all[id as usize];
+        let maybe_leader = MetaLeader::new(mn);
+        let rst = maybe_leader
+            .write(LogEntry {
+                txid: None,
+                cmd: Cmd::UpsertKV {
+                    key: key.to_string(),
+                    seq: MatchSeq::Any,
+                    value: Operation::Update(key.to_string().into_bytes()),
+                    value_meta: None,
+                },
+            })
+            .await;
 
-        let leader_id = all[0].raft.metrics().borrow().current_leader.unwrap();
-
-        // test writing to leader and non-leader
-        let key = "t-non-leader-write";
-        for id in 0u64..4 {
-            let mn = &all[id as usize];
-            let maybe_leader = MetaLeader::new(mn);
-            let rst = maybe_leader
-                .write(LogEntry {
-                    txid: None,
-                    cmd: Cmd::UpsertKV {
-                        key: key.to_string(),
-                        seq: MatchSeq::Any,
-                        value: Operation::Update(key.to_string().into_bytes()),
-                        value_meta: None,
-                    },
-                })
-                .await;
-
-            if id == leader_id {
-                assert!(rst.is_ok());
-            } else {
-                assert!(rst.is_err());
-                let e = rst.unwrap_err();
-                match e {
-                    MetaError::MetaRaftError(MetaRaftError::ForwardToLeader(ForwardToLeader {
-                        leader_id: forward_leader_id,
-                    })) => {
-                        assert_eq!(Some(leader_id), forward_leader_id);
-                    }
-                    _ => {
-                        panic!("expect MetaRaftError::ForwardToLeader")
-                    }
+        if id == leader_id {
+            assert!(rst.is_ok());
+        } else {
+            assert!(rst.is_err());
+            let e = rst.unwrap_err();
+            match e {
+                MetaError::MetaRaftError(MetaRaftError::ForwardToLeader(ForwardToLeader {
+                    leader_id: forward_leader_id,
+                })) => {
+                    assert_eq!(Some(leader_id), forward_leader_id);
+                }
+                _ => {
+                    panic!("expect MetaRaftError::ForwardToLeader")
                 }
             }
         }
@@ -179,16 +158,13 @@ async fn test_meta_node_write_to_local_leader() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 5)]
+#[async_entry::test(worker_threads = 5, init = "init_meta_ut!()", tracing_span = "debug")]
 async fn test_meta_node_snapshot_replication() -> anyhow::Result<()> {
     // - Bring up a cluster of 3.
     // - Write just enough logs to trigger a snapshot.
     // - Add a non-voter, test the snapshot is sync-ed
     // - Write logs to trigger another snapshot.
     // - Add
-
-    let (_log_guards, ut_span) = init_meta_ut!();
-    let _ent = ut_span.enter();
 
     // Create a snapshot every 10 logs
     let snap_logs = 10;
@@ -198,7 +174,7 @@ async fn test_meta_node_snapshot_replication() -> anyhow::Result<()> {
     tc.config.raft_config.install_snapshot_timeout = 10_1000; // milli seconds. In a CI multi-threads test delays async task badly.
     tc.config.raft_config.max_applied_log_to_keep = 0;
 
-    let mn = MetaNode::boot(&tc.config.raft_config).await?;
+    let mn = MetaNode::boot(&tc.config).await?;
 
     tc.assert_raft_server_connection().await?;
 
@@ -283,15 +259,12 @@ async fn test_meta_node_snapshot_replication() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 5)]
+#[async_entry::test(worker_threads = 5, init = "init_meta_ut!()", tracing_span = "debug")]
 async fn test_meta_node_join() -> anyhow::Result<()> {
     // - Bring up a cluster
     // - Join a new node by sending a Join request to leader.
     // - Join a new node by sending a Join request to a non-voter.
     // - Restart all nodes and check if states are restored.
-
-    let (_log_guards, ut_span) = init_meta_ut!();
-    let _ent = ut_span.enter();
 
     let span = tracing::span!(tracing::Level::INFO, "test_meta_node_join");
     let _ent = span.enter();
@@ -305,14 +278,27 @@ async fn test_meta_node_join() -> anyhow::Result<()> {
 
     let node_id = 2;
     let tc2 = MetaSrvTestContext::new(node_id);
-    let mn2 = MetaNode::open_create_boot(&tc2.config.raft_config, None, Some(()), None).await?;
+
+    let mn2 = MetaNode::open_create_boot(
+        &tc2.config.raft_config,
+        None,
+        Some(()),
+        false,
+        tc2.config.get_node(),
+    )
+    .await?;
 
     tracing::info!("--- join non-voter 2 to cluster by leader");
 
     let leader_id = all[0].get_leader().await;
     let leader = all[leader_id as usize].clone();
 
-    let admin_req = join_req(node_id, tc2.config.raft_config.raft_api_addr().await?, 0);
+    let admin_req = join_req(
+        node_id,
+        tc2.config.raft_config.raft_api_addr().await?,
+        tc2.config.grpc_api_address.clone(),
+        0,
+    );
     leader.handle_forwardable_request(admin_req).await?;
 
     all.push(mn2.clone());
@@ -331,14 +317,26 @@ async fn test_meta_node_join() -> anyhow::Result<()> {
 
     let node_id = 3;
     let tc3 = MetaSrvTestContext::new(node_id);
-    let mn3 = MetaNode::open_create_boot(&tc3.config.raft_config, None, Some(()), None).await?;
+    let mn3 = MetaNode::open_create_boot(
+        &tc3.config.raft_config,
+        None,
+        Some(()),
+        false,
+        tc3.config.get_node(),
+    )
+    .await?;
 
     tracing::info!("--- join node-3 by sending rpc `join` to a non-leader");
     {
         let to_addr = tc1.config.raft_config.raft_api_addr().await?;
 
         let mut client = RaftServiceClient::connect(format!("http://{}", to_addr)).await?;
-        let admin_req = join_req(node_id, tc3.config.raft_config.raft_api_addr().await?, 1);
+        let admin_req = join_req(
+            node_id,
+            tc3.config.raft_config.raft_api_addr().await?,
+            tc3.config.grpc_api_address.clone(),
+            1,
+        );
         client.forward(admin_req).await?;
     }
 
@@ -363,10 +361,38 @@ async fn test_meta_node_join() -> anyhow::Result<()> {
 
     tracing::info!("--- re-open all meta node");
 
-    let mn0 = MetaNode::open_create_boot(&tc0.config.raft_config, Some(()), None, None).await?;
-    let mn1 = MetaNode::open_create_boot(&tc1.config.raft_config, Some(()), None, None).await?;
-    let mn2 = MetaNode::open_create_boot(&tc2.config.raft_config, Some(()), None, None).await?;
-    let mn3 = MetaNode::open_create_boot(&tc3.config.raft_config, Some(()), None, None).await?;
+    let mn0 = MetaNode::open_create_boot(
+        &tc0.config.raft_config,
+        Some(()),
+        None,
+        false,
+        tc0.config.get_node(),
+    )
+    .await?;
+    let mn1 = MetaNode::open_create_boot(
+        &tc1.config.raft_config,
+        Some(()),
+        None,
+        false,
+        tc1.config.get_node(),
+    )
+    .await?;
+    let mn2 = MetaNode::open_create_boot(
+        &tc2.config.raft_config,
+        Some(()),
+        None,
+        false,
+        tc2.config.get_node(),
+    )
+    .await?;
+    let mn3 = MetaNode::open_create_boot(
+        &tc3.config.raft_config,
+        Some(()),
+        None,
+        false,
+        tc3.config.get_node(),
+    )
+    .await?;
 
     let all = vec![mn0, mn1, mn2, mn3];
 
@@ -382,16 +408,11 @@ async fn test_meta_node_join() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 5)]
+#[async_entry::test(worker_threads = 5, init = "init_meta_ut!()", tracing_span = "debug")]
 async fn test_meta_node_leave() -> anyhow::Result<()> {
     // - Bring up a cluster
     // - Leave a node by sending a Leave request to a non-voter.
     // - Restart all nodes and check if states are restored.
-
-    let (_log_guards, ut_span) = init_meta_ut!();
-    let _ent = ut_span.enter();
-    let span = tracing::span!(tracing::Level::INFO, "test_meta_node_leave");
-    let _ent = span.enter();
 
     let (mut _nlog, tcs) = start_meta_node_cluster(btreeset![0, 1, 2], btreeset![3]).await?;
     let mut all = test_context_nodes(&tcs);
@@ -415,8 +436,23 @@ async fn test_meta_node_leave() -> anyhow::Result<()> {
 
     let tc0 = &tcs[0];
     let tc2 = &tcs[2];
-    let mn0 = MetaNode::open_create_boot(&tc0.config.raft_config, Some(()), None, None).await?;
-    let mn2 = MetaNode::open_create_boot(&tc2.config.raft_config, Some(()), None, None).await?;
+
+    let mn0 = MetaNode::open_create_boot(
+        &tc0.config.raft_config,
+        Some(()),
+        None,
+        false,
+        tc0.config.get_node(),
+    )
+    .await?;
+    let mn2 = MetaNode::open_create_boot(
+        &tc2.config.raft_config,
+        Some(()),
+        None,
+        false,
+        tc2.config.get_node(),
+    )
+    .await?;
 
     let all = vec![mn0, mn2];
 
@@ -432,17 +468,11 @@ async fn test_meta_node_leave() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 5)]
+#[async_entry::test(worker_threads = 5, init = "init_meta_ut!()", tracing_span = "debug")]
 async fn test_meta_node_join_rejoin() -> anyhow::Result<()> {
     // - Bring up a cluster
     // - Join a new node.
     // - Join another new node twice.
-
-    let (_log_guards, ut_span) = init_meta_ut!();
-    let _ent = ut_span.enter();
-
-    let span = tracing::span!(tracing::Level::INFO, "test_meta_node_join_rejoin");
-    let _ent = span.enter();
 
     let (mut _nlog, mut tcs) = start_meta_node_cluster(btreeset![0], btreeset![]).await?;
     let mut all = test_context_nodes(&tcs);
@@ -452,13 +482,26 @@ async fn test_meta_node_join_rejoin() -> anyhow::Result<()> {
 
     let node_id = 1;
     let tc1 = MetaSrvTestContext::new(node_id);
-    let mn1 = MetaNode::open_create_boot(&tc1.config.raft_config, None, Some(()), None).await?;
+
+    let mn1 = MetaNode::open_create_boot(
+        &tc1.config.raft_config,
+        None,
+        Some(()),
+        false,
+        tc1.config.get_node(),
+    )
+    .await?;
 
     tracing::info!("--- join non-voter 1 to cluster");
 
     let leader_id = all[0].get_leader().await;
     let leader = all[leader_id as usize].clone();
-    let req = join_req(node_id, tc1.config.raft_config.raft_api_addr().await?, 1);
+    let req = join_req(
+        node_id,
+        tc1.config.raft_config.raft_api_addr().await?,
+        tc1.config.grpc_api_address,
+        1,
+    );
     leader.handle_forwardable_request(req).await?;
 
     all.push(mn1.clone());
@@ -477,16 +520,34 @@ async fn test_meta_node_join_rejoin() -> anyhow::Result<()> {
 
     let node_id = 2;
     let tc2 = MetaSrvTestContext::new(node_id);
-    let mn2 = MetaNode::open_create_boot(&tc2.config.raft_config, None, Some(()), None).await?;
+
+    let mn2 = MetaNode::open_create_boot(
+        &tc2.config.raft_config,
+        None,
+        Some(()),
+        false,
+        tc2.config.get_node(),
+    )
+    .await?;
 
     tracing::info!("--- join node-2 by sending rpc `join` to a non-leader");
     {
-        let req = join_req(node_id, tc2.config.raft_config.raft_api_addr().await?, 1);
+        let req = join_req(
+            node_id,
+            tc2.config.raft_config.raft_api_addr().await?,
+            tc2.config.grpc_api_address.clone(),
+            1,
+        );
         leader.handle_forwardable_request(req).await?;
     }
     tracing::info!("--- join node-2 again");
     {
-        let req = join_req(node_id, tc2.config.raft_config.raft_api_addr().await?, 1);
+        let req = join_req(
+            node_id,
+            tc2.config.raft_config.raft_api_addr().await?,
+            tc2.config.grpc_api_address,
+            1,
+        );
         mn1.handle_forwardable_request(req).await?;
     }
 
@@ -507,16 +568,12 @@ async fn test_meta_node_join_rejoin() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 5)]
+#[async_entry::test(worker_threads = 5, init = "init_meta_ut!()", tracing_span = "debug")]
 async fn test_meta_node_restart() -> anyhow::Result<()> {
     // TODO check restarted follower.
     // - Start a leader and a non-voter;
     // - Restart them.
     // - Check old data an new written data.
-
-    // TODO(xp): this only tests for in-memory storage.
-    let (_log_guards, ut_span) = init_meta_ut!();
-    let _ent = ut_span.enter();
 
     let (_nid0, tc0) = start_meta_node_leader().await?;
     let mn0 = tc0.meta_node();
@@ -568,7 +625,7 @@ async fn test_meta_node_restart() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 5)]
+#[async_entry::test(worker_threads = 5, init = "init_meta_ut!()", tracing_span = "debug")]
 async fn test_meta_node_restart_single_node() -> anyhow::Result<()> {
     // TODO(xp): This function will replace `test_meta_node_restart` after fs backed state machine is ready.
 
@@ -587,9 +644,6 @@ async fn test_meta_node_restart_single_node() -> anyhow::Result<()> {
     //   - TODO(xp): Leader starts replication to follower and non-voter.
     //   - TODO(xp): New log will be successfully written and sync
     //   - TODO(xp): A new snapshot will be created and transferred  on demand.
-
-    let (_log_guards, ut_span) = init_meta_ut!();
-    let _ent = ut_span.enter();
 
     let mut log_index: u64 = 0;
     let (_id, tc) = start_meta_node_leader().await?;
@@ -622,7 +676,11 @@ async fn test_meta_node_restart_single_node() -> anyhow::Result<()> {
 
     tracing::info!("--- reopen MetaNode");
 
-    let leader = MetaNode::open_create_boot(&tc.config.raft_config, Some(()), None, None).await?;
+    let raft_conf = &tc.config.raft_config;
+
+    let node = tc.config.get_node();
+
+    let leader = MetaNode::open_create_boot(raft_conf, Some(()), None, false, node).await?;
 
     log_index += 1;
 
@@ -749,7 +807,7 @@ pub(crate) async fn start_meta_node_leader() -> anyhow::Result<(NodeId, MetaSrvT
     let addr = tc.config.raft_config.raft_api_advertise_host_endpoint();
 
     // boot up a single-node cluster
-    let mn = MetaNode::boot(&tc.config.raft_config).await?;
+    let mn = MetaNode::boot(&tc.config).await?;
     tc.meta_node = Some(mn.clone());
 
     {
@@ -774,16 +832,30 @@ async fn start_meta_node_non_voter(
     let mut tc = MetaSrvTestContext::new(id);
     let addr = tc.config.raft_config.raft_api_addr().await?;
 
-    let raft_config = tc.config.raft_config.clone();
+    let raft_conf = &tc.config.raft_config;
+    let grpc_addr = tc.config.grpc_api_address.clone();
 
-    let mn = MetaNode::open_create_boot(&raft_config, None, Some(()), None).await?;
+    let node = Node {
+        name: raft_conf.id.to_string(),
+        endpoint: raft_conf.raft_api_advertise_host_endpoint(),
+        grpc_api_addr: Some(grpc_addr),
+    };
+
+    let mn = MetaNode::open_create_boot(raft_conf, None, Some(()), false, node).await?;
+
     assert!(!mn.is_opened());
 
     tc.meta_node = Some(mn.clone());
 
     {
         // add node to cluster as a non-voter
-        let resp = leader.add_node(id, addr.clone()).await?;
+        let resp = leader
+            .add_node(Node {
+                name: id.to_string(),
+                endpoint: addr.clone(),
+                grpc_api_addr: Some(tc.config.grpc_api_address.clone()),
+            })
+            .await?;
         match resp {
             AppliedState::Node { prev: _, result } => {
                 assert_eq!(addr.clone(), result.unwrap().endpoint);
@@ -803,10 +875,19 @@ async fn start_meta_node_non_voter(
     Ok((id, tc))
 }
 
-fn join_req(node_id: NodeId, endpoint: Endpoint, forward: u64) -> ForwardRequest {
+fn join_req(
+    node_id: NodeId,
+    endpoint: Endpoint,
+    grpc_api_addr: String,
+    forward: u64,
+) -> ForwardRequest {
     ForwardRequest {
         forward_to_leader: forward,
-        body: ForwardRequestBody::Join(JoinRequest { node_id, endpoint }),
+        body: ForwardRequestBody::Join(JoinRequest {
+            node_id,
+            endpoint,
+            grpc_api_addr,
+        }),
     }
 }
 
@@ -918,15 +999,12 @@ fn test_context_nodes(tcs: &[MetaSrvTestContext]) -> Vec<Arc<MetaNode>> {
     tcs.iter().map(|tc| tc.meta_node()).collect::<Vec<_>>()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[async_entry::test(worker_threads = 3, init = "init_meta_ut!()", tracing_span = "debug")]
 async fn test_meta_node_incr_seq() -> anyhow::Result<()> {
-    let (_log_guards, ut_span) = init_meta_ut!();
-    let _ent = ut_span.enter();
-
     let tc = MetaSrvTestContext::new(0);
     let addr = tc.config.raft_config.raft_api_addr().await?;
 
-    let _mn = MetaNode::boot(&tc.config.raft_config).await?;
+    let _mn = MetaNode::boot(&tc.config).await?;
     tc.assert_raft_server_connection().await?;
 
     let mut client = RaftServiceClient::connect(format!("http://{}", addr)).await?;

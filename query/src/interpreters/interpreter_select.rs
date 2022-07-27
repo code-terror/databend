@@ -24,7 +24,6 @@ use common_tracing::tracing;
 use crate::interpreters::plan_schedulers;
 use crate::interpreters::stream::ProcessorExecutorStream;
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::optimizers::Optimizers;
 use crate::pipelines::new::executor::PipelinePullingExecutor;
 use crate::pipelines::new::NewPipeline;
@@ -39,8 +38,8 @@ pub struct SelectInterpreter {
 
 impl SelectInterpreter {
     /// Create the SelectInterpreter from SelectPlan
-    pub fn try_create(ctx: Arc<QueryContext>, select: SelectPlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(SelectInterpreter { ctx, select }))
+    pub fn try_create(ctx: Arc<QueryContext>, select: SelectPlan) -> Result<Self> {
+        Ok(SelectInterpreter { ctx, select })
     }
 
     /// Call this method to optimize the logical plan before executing
@@ -72,32 +71,31 @@ impl Interpreter for SelectInterpreter {
         &self,
         _input_stream: Option<SendableDataBlockStream>,
     ) -> Result<SendableDataBlockStream> {
-        let settings = self.ctx.get_settings();
+        let query_pipeline = self.create_new_pipeline().await?;
+        let async_runtime = self.ctx.get_storage_runtime();
+        let query_need_abort = self.ctx.query_need_abort();
+        let executor =
+            PipelinePullingExecutor::try_create(async_runtime, query_need_abort, query_pipeline)?;
 
-        if settings.get_enable_new_processor_framework()? != 0 && self.ctx.get_cluster().is_empty()
-        {
-            let async_runtime = self.ctx.get_storage_runtime();
-            let new_pipeline = self.create_new_pipeline()?;
-            let executor = PipelinePullingExecutor::try_create(async_runtime, new_pipeline)?;
-            let executor_stream = Box::pin(ProcessorExecutorStream::create(executor)?);
-            return Ok(Box::pin(self.ctx.try_create_abortable(executor_stream)?));
-        }
-        let optimized_plan = self.rewrite_plan()?;
-        plan_schedulers::schedule_query(&self.ctx, &optimized_plan).await
+        Ok(Box::pin(ProcessorExecutorStream::create(executor)?))
     }
 
     /// This method will create a new pipeline
     /// The QueryPipelineBuilder will use the optimized plan to generate a NewPipeline
-    fn create_new_pipeline(&self) -> Result<NewPipeline> {
-        let settings = self.ctx.get_settings();
-        let builder = QueryPipelineBuilder::create(self.ctx.clone());
-
-        let optimized_plan = self.rewrite_plan()?;
-        let select_plan = SelectPlan {
-            input: Arc::new(optimized_plan),
-        };
-        let mut new_pipeline = builder.finalize(&select_plan)?;
-        new_pipeline.set_max_threads(settings.get_max_threads()? as usize);
-        Ok(new_pipeline)
+    async fn create_new_pipeline(&self) -> Result<NewPipeline> {
+        match self.ctx.get_cluster().is_empty() {
+            true => {
+                let settings = self.ctx.get_settings();
+                let builder = QueryPipelineBuilder::create(self.ctx.clone());
+                let mut query_pipeline = builder.finalize(&self.rewrite_plan()?)?;
+                query_pipeline.set_max_threads(settings.get_max_threads()? as usize);
+                Ok(query_pipeline)
+            }
+            false => {
+                let ctx = self.ctx.clone();
+                let optimized_plan = self.rewrite_plan()?;
+                plan_schedulers::schedule_query_new(ctx, &optimized_plan).await
+            }
+        }
     }
 }

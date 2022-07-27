@@ -19,7 +19,7 @@ use common_datablocks::DataBlock;
 use common_datavalues::DataSchema;
 use common_datavalues::DataSchemaRef;
 use common_exception::Result;
-use common_meta_types::TableInfo;
+use common_meta_app::schema::TableInfo;
 use common_planners::Extras;
 use common_planners::Partitions;
 use common_planners::ReadDataSourcePlan;
@@ -78,20 +78,6 @@ impl Table for NullTable {
         _push_downs: Option<Extras>,
     ) -> Result<(Statistics, Partitions)> {
         Ok((Statistics::default(), vec![]))
-    }
-
-    async fn read(
-        &self,
-        _ctx: Arc<QueryContext>,
-        _plan: &ReadDataSourcePlan,
-    ) -> Result<SendableDataBlockStream> {
-        let block = DataBlock::empty_with_schema(self.table_info.schema());
-
-        Ok(Box::pin(DataBlockStream::create(
-            self.table_info.schema(),
-            None,
-            vec![block],
-        )))
     }
 
     fn read2(

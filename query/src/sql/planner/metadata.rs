@@ -12,15 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use common_ast::ast::Expr;
 use common_ast::ast::Literal;
 use common_datavalues::prelude::*;
 use common_planners::ReadDataSourcePlan;
+use parking_lot::RwLock;
 
 use crate::sql::common::IndexType;
 use crate::storages::Table;
+
+pub type MetadataRef = Arc<RwLock<Metadata>>;
 
 #[derive(Clone)]
 pub struct TableEntry {
@@ -32,6 +36,16 @@ pub struct TableEntry {
     pub table: Arc<dyn Table>,
 
     pub source: ReadDataSourcePlan,
+}
+
+impl Debug for TableEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "TableEntry {{ index: {:?}, name: {:?}, catalog: {:?}, database: {:?} }}",
+            self.index, self.name, self.catalog, self.database
+        )
+    }
 }
 
 impl TableEntry {
@@ -54,7 +68,7 @@ impl TableEntry {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ColumnEntry {
     pub column_index: IndexType,
     pub name: String,
@@ -83,7 +97,7 @@ impl ColumnEntry {
 /// Metadata stores information about columns and tables used in a query.
 /// Tables and columns are identified with its unique index, notice that index value of a column can
 /// be same with that of a table.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Metadata {
     tables: Vec<TableEntry>,
     columns: Vec<ColumnEntry>,
@@ -103,6 +117,10 @@ impl Metadata {
 
     pub fn column(&self, index: IndexType) -> &ColumnEntry {
         self.columns.get(index).unwrap()
+    }
+
+    pub fn columns(&self) -> &[ColumnEntry] {
+        self.columns.as_slice()
     }
 
     pub fn columns_by_table_index(&self, index: IndexType) -> Vec<ColumnEntry> {

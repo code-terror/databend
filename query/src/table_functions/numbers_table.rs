@@ -24,18 +24,16 @@ use common_datavalues::chrono::Utc;
 use common_datavalues::prelude::*;
 use common_exception::ErrorCode;
 use common_exception::Result;
-use common_meta_types::TableIdent;
-use common_meta_types::TableInfo;
-use common_meta_types::TableMeta;
+use common_meta_app::schema::TableIdent;
+use common_meta_app::schema::TableInfo;
+use common_meta_app::schema::TableMeta;
 use common_planners::Expression;
 use common_planners::Extras;
 use common_planners::PartInfoPtr;
 use common_planners::Partitions;
 use common_planners::ReadDataSourcePlan;
 use common_planners::Statistics;
-use common_streams::SendableDataBlockStream;
 
-use super::numbers_stream::NumbersStream;
 use crate::pipelines::new::processors::port::OutputPort;
 use crate::pipelines::new::processors::processor::ProcessorPtr;
 use crate::pipelines::new::processors::EmptySource;
@@ -101,6 +99,7 @@ impl NumbersTable {
                 // Assuming that created_on is unnecessary for function table,
                 // we could make created_on fixed to pass test_shuffle_action_try_into.
                 created_on: Utc.from_utc_datetime(&NaiveDateTime::from_timestamp(0, 0)),
+                updated_on: Utc.from_utc_datetime(&NaiveDateTime::from_timestamp(0, 0)),
                 ..Default::default()
             },
         };
@@ -178,19 +177,6 @@ impl Table for NumbersTable {
         ))])
     }
 
-    async fn read(
-        &self,
-        ctx: Arc<QueryContext>,
-        _plan: &ReadDataSourcePlan,
-    ) -> Result<SendableDataBlockStream> {
-        Ok(Box::pin(NumbersStream::try_create(
-            ctx,
-            self.schema(),
-            vec![],
-            None,
-        )?))
-    }
-
     fn read2(
         &self,
         ctx: Arc<QueryContext>,
@@ -198,12 +184,11 @@ impl Table for NumbersTable {
         pipeline: &mut NewPipeline,
     ) -> Result<()> {
         if plan.parts.is_empty() {
-            let schema = plan.schema();
             let output = OutputPort::create();
             pipeline.add_pipe(NewPipe::SimplePipe {
                 inputs_port: vec![],
                 outputs_port: vec![output.clone()],
-                processors: vec![EmptySource::create(ctx, output, schema)?],
+                processors: vec![EmptySource::create(output)?],
             });
 
             return Ok(());
@@ -258,7 +243,7 @@ impl NumbersSource {
 }
 
 impl SyncSource for NumbersSource {
-    const NAME: &'static str = "numbers";
+    const NAME: &'static str = "NumbersSourceTransform";
 
     fn generate(&mut self) -> Result<Option<DataBlock>> {
         let source_remain_size = self.end - self.begin;

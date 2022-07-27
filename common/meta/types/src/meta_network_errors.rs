@@ -19,7 +19,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 // represent network related errors
-#[derive(Error, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Error, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum MetaNetworkError {
     #[error(transparent)]
     ConnectionError(#[from] ConnectionError),
@@ -35,6 +35,9 @@ pub enum MetaNetworkError {
 
     #[error(transparent)]
     BadAddressFormat(AnyError),
+
+    #[error(transparent)]
+    InvalidArgument(#[from] InvalidArgument),
 }
 
 impl From<MetaNetworkError> for ErrorCode {
@@ -53,13 +56,16 @@ impl From<MetaNetworkError> for ErrorCode {
                 ErrorCode::TLSConfigurationFailure(any_err.to_string())
             }
             MetaNetworkError::DnsParseError(_) => ErrorCode::DnsParseError(net_err.to_string()),
+            MetaNetworkError::InvalidArgument(inv_arg) => {
+                ErrorCode::InvalidArgument(inv_arg.to_string())
+            }
         }
     }
 }
 
 pub type MetaNetworkResult<T> = std::result::Result<T, MetaNetworkError>;
 
-#[derive(Error, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Error, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[error("ConnectionError: {msg} source: {source}")]
 pub struct ConnectionError {
     msg: String,
@@ -68,6 +74,23 @@ pub struct ConnectionError {
 }
 
 impl ConnectionError {
+    pub fn new(source: impl std::error::Error + 'static, msg: impl Into<String>) -> Self {
+        Self {
+            msg: msg.into(),
+            source: AnyError::new(&source),
+        }
+    }
+}
+
+#[derive(Error, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[error("InvalidArgument: {msg} source: {source}")]
+pub struct InvalidArgument {
+    msg: String,
+    #[source]
+    source: AnyError,
+}
+
+impl InvalidArgument {
     pub fn new(source: impl std::error::Error + 'static, msg: impl Into<String>) -> Self {
         Self {
             msg: msg.into(),

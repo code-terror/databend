@@ -29,6 +29,8 @@ use super::statements::DfDropView;
 use super::statements::DfGrantRoleStatement;
 use super::statements::DfList;
 use super::statements::DfRevokeRoleStatement;
+use super::statements::DfShowStages;
+use super::statements::DfUndropDatabase;
 use crate::sql::statements::DfAlterDatabase;
 use crate::sql::statements::DfAlterTable;
 use crate::sql::statements::DfAlterUDF;
@@ -39,18 +41,21 @@ use crate::sql::statements::DfCreateTable;
 use crate::sql::statements::DfCreateUDF;
 use crate::sql::statements::DfCreateUser;
 use crate::sql::statements::DfCreateView;
+use crate::sql::statements::DfDeleteStatement;
 use crate::sql::statements::DfDescribeTable;
 use crate::sql::statements::DfDropDatabase;
 use crate::sql::statements::DfDropRole;
 use crate::sql::statements::DfDropTable;
 use crate::sql::statements::DfDropUDF;
 use crate::sql::statements::DfDropUser;
+use crate::sql::statements::DfExistsTable;
 use crate::sql::statements::DfExplain;
 use crate::sql::statements::DfGrantPrivilegeStatement;
 use crate::sql::statements::DfInsertStatement;
 use crate::sql::statements::DfKillStatement;
 use crate::sql::statements::DfOptimizeTable;
 use crate::sql::statements::DfQueryStatement;
+use crate::sql::statements::DfRemoveStage;
 use crate::sql::statements::DfRenameTable;
 use crate::sql::statements::DfRevokePrivilegeStatement;
 use crate::sql::statements::DfSetVariable;
@@ -64,13 +69,15 @@ use crate::sql::statements::DfShowMetrics;
 use crate::sql::statements::DfShowProcessList;
 use crate::sql::statements::DfShowRoles;
 use crate::sql::statements::DfShowSettings;
-use crate::sql::statements::DfShowTabStat;
 use crate::sql::statements::DfShowTables;
+use crate::sql::statements::DfShowTablesStatus;
 use crate::sql::statements::DfShowUsers;
 use crate::sql::statements::DfTruncateTable;
+use crate::sql::statements::DfUndropTable;
 use crate::sql::statements::DfUseDatabase;
 
 /// Tokens parsed by `DFParser` are converted into these values.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum DfStatement<'a> {
     // ANSI SQL AST node
@@ -88,13 +95,16 @@ pub enum DfStatement<'a> {
     // Tables.
     ShowTables(DfShowTables),
     ShowCreateTable(DfShowCreateTable),
-    ShowTabStat(DfShowTabStat),
+    ShowTablesStatus(DfShowTablesStatus),
     CreateTable(DfCreateTable),
     DescribeTable(DfDescribeTable),
     DropTable(DfDropTable),
+    UndropTable(DfUndropTable),
+    UndropDatabase(DfUndropDatabase),
     AlterTable(DfAlterTable),
     TruncateTable(DfTruncateTable),
     OptimizeTable(DfOptimizeTable),
+    ExistsTable(DfExistsTable),
     RenameTable(DfRenameTable),
 
     // Views.
@@ -124,6 +134,9 @@ pub enum DfStatement<'a> {
     // Insert
     InsertQuery(DfInsertStatement<'a>),
 
+    // Delete
+    Delete(Box<DfDeleteStatement>),
+
     // User
     CreateUser(DfCreateUser),
     AlterUser(DfAlterUser),
@@ -142,7 +155,9 @@ pub enum DfStatement<'a> {
     CreateStage(DfCreateUserStage),
     DropStage(DfDropUserStage),
     DescribeStage(DfDescribeUserStage),
+    RemoveStage(DfRemoveStage),
     List(DfList),
+    ShowStages(DfShowStages),
 
     // Call
     Call(DfCall),
@@ -168,7 +183,7 @@ pub enum DfStatement<'a> {
 /// Comment hints from SQL.
 /// It'll be enabled when using `--comment` in mysql client.
 /// Eg: `SELECT * FROM system.number LIMIT 1; -- { ErrorCode 25 }`
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DfHint {
     pub error_code: Option<u16>,
     pub comment: String,

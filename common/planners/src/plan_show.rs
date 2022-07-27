@@ -17,7 +17,7 @@ use std::sync::Arc;
 use common_datavalues::DataSchema;
 use common_datavalues::DataSchemaRef;
 
-use crate::plan_show_tab_stat::ShowTabStatPlan;
+use crate::plan_show_tables_status::ShowTablesStatusPlan;
 use crate::ShowDatabasesPlan;
 use crate::ShowEnginesPlan;
 use crate::ShowFunctionsPlan;
@@ -29,7 +29,7 @@ use crate::ShowSettingsPlan;
 use crate::ShowTablesPlan;
 use crate::ShowUsersPlan;
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum PlanShowKind {
     All,
 
@@ -40,7 +40,7 @@ pub enum PlanShowKind {
     Where(String),
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum ShowPlan {
     ShowDatabases(ShowDatabasesPlan),
     ShowTables(ShowTablesPlan),
@@ -52,7 +52,8 @@ pub enum ShowPlan {
     ShowUsers(ShowUsersPlan),
     ShowGrants(ShowGrantsPlan),
     ShowRoles(ShowRolesPlan),
-    ShowTabStat(ShowTabStatPlan),
+    ShowTablesStatus(ShowTablesStatusPlan),
+    ShowStages,
 }
 
 impl ShowPlan {

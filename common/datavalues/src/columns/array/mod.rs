@@ -18,6 +18,8 @@ use common_arrow::arrow::array::*;
 use common_arrow::arrow::buffer::Buffer;
 use common_arrow::arrow::datatypes::DataType as ArrowType;
 use common_arrow::arrow::types::Index;
+use common_arrow::ArrayRef;
+use common_io::prelude::BinaryWrite;
 
 use crate::prelude::*;
 
@@ -39,10 +41,15 @@ pub struct ArrayColumn {
 impl ArrayColumn {
     pub fn new(array: LargeListArray) -> Self {
         let ty = array.data_type();
-
-        let data_type = if let ArrowType::LargeList(f) = ty {
-            let ty = from_arrow_field(f);
-            DataTypeImpl::Array(ArrayType::create(ty))
+        let (data_type, values) = if let ArrowType::LargeList(f) = ty {
+            let inner_type = from_arrow_field(f);
+            let values = if inner_type.is_nullable() {
+                array.values().clone().into_nullable_column()
+            } else {
+                array.values().clone().into_column()
+            };
+            let data_type = ArrayType::new_impl(inner_type);
+            (data_type, values)
         } else {
             unreachable!()
         };
@@ -50,7 +57,7 @@ impl ArrayColumn {
         Self {
             data_type,
             offsets: array.offsets().clone(),
-            values: array.values().clone().into_column(),
+            values,
         }
     }
 
@@ -102,8 +109,9 @@ impl Column for ArrayColumn {
     }
 
     fn column_meta(&self) -> ColumnMeta {
+        let data_type: ArrayType = self.data_type.clone().try_into().unwrap();
         ColumnMeta::Array {
-            data_type: self.data_type.clone(),
+            inner_type: data_type.inner_type().clone(),
         }
     }
 
@@ -118,7 +126,7 @@ impl Column for ArrayColumn {
     fn as_arrow_array(&self) -> ArrayRef {
         let arrow_type = self.data_type().arrow_type();
         let array = self.values.as_arrow_array();
-        Arc::new(LargeListArray::from_data(
+        Box::new(LargeListArray::from_data(
             arrow_type,
             self.offsets.clone(),
             array,
@@ -165,6 +173,16 @@ impl Column for ArrayColumn {
             .collect();
         DataValue::Array(values)
     }
+
+    fn serialize(&self, vec: &mut Vec<u8>, row: usize) {
+        let offset = self.offsets[row] as usize;
+        let length = self.size_at_index(row);
+
+        BinaryWrite::write_uvarint(vec, length as u64).unwrap();
+        for row in offset..offset + length {
+            self.values.serialize(vec, row);
+        }
+    }
 }
 
 impl ScalarColumn for ArrayColumn {
@@ -185,10 +203,9 @@ impl ScalarColumn for ArrayColumn {
 
 impl std::fmt::Debug for ArrayColumn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut data = Vec::new();
+        let mut data = Vec::with_capacity(self.len());
         for idx in 0..self.len() {
-            let x = self.get(idx);
-            data.push(format!("{:?}", x));
+            data.push(format!("{:?}", self.get(idx)));
         }
         let head = "ArrayColumn";
         let iter = data.iter();

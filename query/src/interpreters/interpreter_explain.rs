@@ -24,9 +24,8 @@ use common_streams::SendableDataBlockStream;
 
 use crate::interpreters::plan_schedulers;
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::optimizers::Optimizers;
-use crate::pipelines::processors::PipelineBuilder;
+use crate::pipelines::new::QueryPipelineBuilder;
 use crate::sessions::QueryContext;
 
 pub struct ExplainInterpreter {
@@ -38,6 +37,10 @@ pub struct ExplainInterpreter {
 impl Interpreter for ExplainInterpreter {
     fn name(&self) -> &str {
         "ExplainInterpreter"
+    }
+
+    fn schema(&self) -> DataSchemaRef {
+        self.explain.schema()
     }
 
     async fn execute(
@@ -54,15 +57,11 @@ impl Interpreter for ExplainInterpreter {
 
         Ok(Box::pin(DataBlockStream::create(schema, None, vec![block])))
     }
-
-    fn schema(&self) -> DataSchemaRef {
-        self.explain.schema()
-    }
 }
 
 impl ExplainInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, explain: ExplainPlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(ExplainInterpreter { ctx, explain }))
+    pub fn try_create(ctx: Arc<QueryContext>, explain: ExplainPlan) -> Result<Self> {
+        Ok(ExplainInterpreter { ctx, explain })
     }
 
     fn explain_graph(&self) -> Result<DataBlock> {
@@ -101,10 +100,11 @@ impl ExplainInterpreter {
         let optimizer = Optimizers::without_scatters(self.ctx.clone());
         let plan = plan_schedulers::apply_plan_rewrite(optimizer, &self.explain.input)?;
 
-        let pipeline_builder = PipelineBuilder::create(self.ctx.clone());
-        let pipeline = pipeline_builder.build(&plan)?;
+        let pipeline_builder = QueryPipelineBuilder::create(self.ctx.clone());
+        let pipeline = pipeline_builder.finalize(&plan)?;
+
         let formatted_pipeline = Series::from_data(
-            format!("{:?}", pipeline)
+            format!("{}", pipeline.display_indent())
                 .lines()
                 .map(|s| s.as_bytes())
                 .collect::<Vec<_>>(),

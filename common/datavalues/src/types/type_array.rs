@@ -23,6 +23,8 @@ use super::data_type::DataType;
 use super::data_type::DataTypeImpl;
 use super::type_id::TypeID;
 use crate::prelude::*;
+use crate::serializations::ArraySerializer;
+use crate::serializations::TypeSerializerImpl;
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub struct ArrayType {
@@ -63,6 +65,15 @@ impl DataType for ArrayType {
         DataValue::Array(vec![])
     }
 
+    fn random_value(&self) -> DataValue {
+        // randomly generate an array with 3 elements.
+        DataValue::Array(vec![
+            self.inner.random_value(),
+            self.inner.random_value(),
+            self.inner.random_value(),
+        ])
+    }
+
     fn create_constant_column(&self, data: &DataValue, size: usize) -> Result<ColumnRef> {
         if let DataValue::Array(value) = data {
             let inner_column = self.inner.create_column(value)?;
@@ -76,10 +87,10 @@ impl DataType for ArrayType {
             return Ok(Arc::new(ConstColumn::new(column, size)));
         }
 
-        return Result::Err(ErrorCode::BadDataValueType(format!(
+        Err(ErrorCode::BadDataValueType(format!(
             "Unexpected type:{:?} to generate list column",
             data.value_type()
-        )));
+        )))
     }
 
     fn create_column(&self, data: &[DataValue]) -> Result<ColumnRef> {
@@ -107,23 +118,23 @@ impl DataType for ArrayType {
     }
 
     fn arrow_type(&self) -> ArrowType {
-        let field = Field::new("list".to_string(), self.inner.arrow_type(), false);
+        let field = Field::new(
+            "list".to_string(),
+            self.inner.arrow_type(),
+            self.inner.is_nullable(),
+        );
         ArrowType::LargeList(Box::new(field))
     }
 
-    fn create_serializer(&self) -> TypeSerializerImpl {
-        ArraySerializer {
-            inner: Box::new(self.inner.create_serializer()),
-            typ: *self.inner.clone(),
-        }
-        .into()
+    fn create_serializer_inner<'a>(&self, col: &'a ColumnRef) -> Result<TypeSerializerImpl<'a>> {
+        Ok(ArraySerializer::try_create(col, &self.inner)?.into())
     }
 
     fn create_deserializer(&self, capacity: usize) -> TypeDeserializerImpl {
         ArrayDeserializer {
             inner: Box::new(self.inner.create_deserializer(capacity)),
             builder: MutableArrayColumn::with_capacity_meta(capacity, ColumnMeta::Array {
-                data_type: *self.inner.clone(),
+                inner_type: *self.inner.clone(),
             }),
         }
         .into()
@@ -133,7 +144,7 @@ impl DataType for ArrayType {
         Box::new(MutableArrayColumn::with_capacity_meta(
             capacity,
             ColumnMeta::Array {
-                data_type: *self.inner.clone(),
+                inner_type: *self.inner.clone(),
             },
         ))
     }

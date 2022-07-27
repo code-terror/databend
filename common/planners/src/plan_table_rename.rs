@@ -17,20 +17,20 @@ use std::sync::Arc;
 use common_datavalues::DataSchema;
 use common_datavalues::DataSchemaRef;
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RenameTablePlan {
     pub tenant: String,
     pub entities: Vec<RenameTableEntity>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RenameTableEntity {
     pub if_exists: bool,
-    pub catalog_name: String,
-    pub database_name: String,
-    pub table_name: String,
-    pub new_database_name: String,
-    pub new_table_name: String,
+    pub catalog: String,
+    pub database: String,
+    pub table: String,
+    pub new_database: String,
+    pub new_table: String,
 }
 
 impl RenameTablePlan {

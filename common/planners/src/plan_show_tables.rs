@@ -14,10 +14,12 @@
 
 use crate::PlanShowKind;
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ShowTablesPlan {
     pub kind: PlanShowKind,
     pub showfull: bool,
     // show tables from db1 [or in db1]
     pub fromdb: Option<String>,
+    // TRUE if dropped tables should be shown
+    pub with_history: bool,
 }

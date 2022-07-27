@@ -141,6 +141,8 @@ build_exceptions! {
     NetworkRequestError(1073),
 
     UnknownFormat(1074),
+    UnknownCompressionType(1075),
+    InvalidCompressionData(1076),
 
     // Tenant error codes.
     TenantIsEmpty(1101),
@@ -150,6 +152,12 @@ build_exceptions! {
     LayoutError(1103),
 
     PanicError(1104),
+
+    // Async insert error codes
+    AsyncInsertTimeoutError(1105),
+
+    TableInfoError(1106),
+    ReadTableDataError(1107),
 }
 
 // Metasvr errors [2001, 3000].
@@ -158,9 +166,12 @@ build_exceptions! {
     MetaServiceError(2001),
     InvalidConfig(2002),
     MetaStorageError(2003),
+    InvalidArgument(2004),
 
     TableVersionMismatched(2009),
     OCCRetryFailure(2011),
+    TableNotWritable(2012),
+    TableHistoricalDataNotFound(2013),
 
     // User api error codes.
     UnknownUser(2201),
@@ -175,6 +186,16 @@ build_exceptions! {
     IllegalMetaState(2304),
     MetaNodeInternalError(2305),
     ViewAlreadyExists(2306),
+    CreateTableWithDropTime(2307),
+    UndropTableAlreadyExists(2308),
+    UndropTableHasNoHistory(2309),
+    CreateDatabaseWithDropTime(2310),
+    UndropDbHasNoHistory(2312),
+    UndropTableWithNoDropTime(2313),
+    DropTableWithDropTime(2314),
+    DropDbWithDropTime(2315),
+    UndropDbWithNoDropTime(2316),
+    TxnRetryMaxTimes(2317),
 
     // Cluster error codes.
     ClusterUnknownNode(2401),
@@ -184,11 +205,14 @@ build_exceptions! {
     UnknownStage(2501),
     StageAlreadyExists(2502),
     IllegalUserStageFormat(2503),
+    StageFileAlreadyExists(2504),
+    IllegalStageFileFormat(2505),
 
     // User defined function error codes.
     IllegalUDFFormat(2601),
     UnknownUDF(2602),
     UdfAlreadyExists(2603),
+    UnsupportedIntervalKind(2604),
 
     // Database error codes.
     UnknownDatabaseEngine(2701),
@@ -202,18 +226,23 @@ build_exceptions! {
 
     // Variable error codes.
     UnknownVariable(2801),
+    OnlySupportAsciiChars(2802),
 
     // Tenant quota error codes.
     IllegalTenantQuotaFormat(2901),
     TenantQuotaUnknown(2902),
     TenantQuotaExceeded(2903),
+
 }
 
 // Storage errors [3001, 4000].
 build_exceptions! {
     StorageNotFound(3001),
     StoragePermissionDenied(3002),
-    StorageOther(4000)
+    StorageUnavailable(3901),
+    StorageUnsupported(3902),
+    StorageInsecure(3903),
+    StorageOther(4000),
 }
 
 // Cache errors [4001, 5000].

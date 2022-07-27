@@ -16,8 +16,8 @@ use std::any::Any;
 use std::sync::Arc;
 
 use common_arrow::arrow::array::Array;
-use common_arrow::arrow::array::ArrayRef;
 use common_arrow::arrow::bitmap::Bitmap;
+use common_arrow::ArrayRef;
 use common_exception::ErrorCode;
 use common_exception::Result;
 
@@ -152,6 +152,25 @@ pub trait Column: Send + Sync {
     fn to_values(&self) -> Vec<DataValue> {
         (0..self.len()).map(|i| self.get(i)).collect()
     }
+
+    /// Apply binary mode function to each element of the column.
+    /// WARN: Can't use `&mut [Vec<u8>]` because it has performance drawback.
+    /// Refer: https://github.com/rust-lang/rust-clippy/issues/8334
+    /*
+     * not nullable col1                 nullable col2 (first byte to indicate null or not)
+     * │                                 │
+     * │                                 │
+     * ▼                                 ▼
+     * ┌──────────┬──────────┬───────────┬───────────┬───────────┬───────────┬─────────┬─────────┐
+     * │   1byte  │   1byte  │    1byte  │    1byte  │   1byte   │    1byte  │   1byte │   1byte │ ....
+     * └──────────┴──────────┴───────────┴───────────┴───────────┴───────────┴─────────┴─────────┘
+     *  ▲                                ▲           ▲                                           ▲
+     *  │                                │           │                                           │
+     *  │        Binary Datas            │ null sign │              Binary Datas                 │
+     *  │                                │           │                                           │
+     *  └────────────────────────────────┘           └──────────────────────────────────────────►┘
+     */
+    fn serialize(&self, vec: &mut Vec<u8>, row: usize);
 }
 
 pub trait IntoColumn {

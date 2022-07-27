@@ -26,14 +26,14 @@ use crate::sql::statements::resolve_database;
 use crate::sql::statements::AnalyzableStatement;
 use crate::sql::statements::AnalyzedResult;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DfAlterDatabase {
     pub if_exists: bool,
     pub database_name: ObjectName,
     pub action: AlterDatabaseAction,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AlterDatabaseAction {
     RenameDatabase(ObjectName),
 }
@@ -43,17 +43,17 @@ impl AnalyzableStatement for DfAlterDatabase {
     #[tracing::instrument(level = "debug", skip(self, ctx), fields(ctx.id = ctx.get_id().as_str()))]
     async fn analyze(&self, ctx: Arc<QueryContext>) -> Result<AnalyzedResult> {
         let tenant = ctx.get_tenant();
-        let (catalog, db) = resolve_database(&ctx, &self.database_name, "ALTER DATABASE")?;
+        let (catalog, database) = resolve_database(&ctx, &self.database_name, "ALTER DATABASE")?;
 
         match &self.action {
             AlterDatabaseAction::RenameDatabase(o) => {
                 let mut entities = Vec::new();
-                let (_new_catalog, new_db) = resolve_database(&ctx, o, "ALTER DATABASE")?;
+                let (_new_catalog, new_database) = resolve_database(&ctx, o, "ALTER DATABASE")?;
                 entities.push(RenameDatabaseEntity {
                     if_exists: self.if_exists,
-                    catalog_name: catalog,
-                    db,
-                    new_db,
+                    catalog,
+                    database,
+                    new_database,
                 });
 
                 Ok(AnalyzedResult::SimpleQuery(Box::new(

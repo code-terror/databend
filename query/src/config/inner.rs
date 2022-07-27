@@ -17,14 +17,14 @@ use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Formatter;
 use std::str::FromStr;
+use std::time::Duration;
 
 use common_base::base::mask_string;
 use common_exception::ErrorCode;
 use common_exception::Result;
 use common_grpc::RpcClientConf;
 use common_grpc::RpcClientTlsConfig;
-use common_io::prelude::StorageConfig;
-use common_meta_grpc::MetaGrpcClientConf;
+use common_storage::StorageConfig;
 use common_tracing::Config as LogConfig;
 
 use super::outer_v0::Config as OuterV0Config;
@@ -32,8 +32,9 @@ use super::outer_v0::Config as OuterV0Config;
 /// Inner config for query.
 ///
 /// All function should implemented based on this Config.
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct Config {
+    pub cmd: String,
     pub config_file: String,
 
     // Query engine config.
@@ -91,7 +92,7 @@ impl Config {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryConfig {
     /// Tenant id for get the information from the MetaSrv.
     pub tenant_id: String,
@@ -103,6 +104,8 @@ pub struct QueryConfig {
     pub max_active_sessions: u64,
     pub clickhouse_handler_host: String,
     pub clickhouse_handler_port: u16,
+    pub clickhouse_http_handler_host: String,
+    pub clickhouse_http_handler_port: u16,
     pub http_handler_host: String,
     pub http_handler_port: u16,
     pub http_handler_result_timeout_millis: u64,
@@ -145,6 +148,9 @@ pub struct QueryConfig {
     /// If in management mode, only can do some meta level operations(database/table/user/stage etc.) with metasrv.
     pub management_mode: bool,
     pub jwt_key_file: String,
+    pub async_insert_max_data_size: u64,
+    pub async_insert_busy_timeout: u64,
+    pub async_insert_stale_timeout: u64,
 }
 
 impl Default for QueryConfig {
@@ -158,6 +164,8 @@ impl Default for QueryConfig {
             max_active_sessions: 256,
             clickhouse_handler_host: "127.0.0.1".to_string(),
             clickhouse_handler_port: 9000,
+            clickhouse_http_handler_host: "127.0.0.1".to_string(),
+            clickhouse_http_handler_port: 8124,
             http_handler_host: "127.0.0.1".to_string(),
             http_handler_port: 8000,
             http_handler_result_timeout_millis: 10000,
@@ -187,6 +195,9 @@ impl Default for QueryConfig {
             table_disk_cache_mb_size: 1024,
             management_mode: false,
             jwt_key_file: "".to_string(),
+            async_insert_max_data_size: 10000,
+            async_insert_busy_timeout: 200,
+            async_insert_stale_timeout: 0,
         }
     }
 }
@@ -200,7 +211,7 @@ impl QueryConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ThriftProtocol {
     Binary,
     // Compact,
@@ -226,7 +237,7 @@ impl Display for ThriftProtocol {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HiveCatalogConfig {
     pub meta_store_address: String,
     pub protocol: ThriftProtocol,
@@ -241,7 +252,7 @@ impl Default for HiveCatalogConfig {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct MetaConfig {
     /// The dir to store persisted meta state for a embedded meta store
     pub embedded_dir: String,
@@ -254,6 +265,9 @@ pub struct MetaConfig {
     pub password: String,
     /// Timeout for each client request, in seconds
     pub client_timeout_in_second: u64,
+    /// AutoSyncInterval is the interval to update endpoints with its latest members.
+    /// 0 disables auto-sync. By default auto-sync is disabled.
+    pub auto_sync_interval: u64,
     /// Certificate for client to identify meta rpc serve
     pub rpc_tls_meta_server_root_ca_cert: String,
     pub rpc_tls_meta_service_domain_name: String,
@@ -268,6 +282,7 @@ impl Default for MetaConfig {
             username: "root".to_string(),
             password: "".to_string(),
             client_timeout_in_second: 10,
+            auto_sync_interval: 10,
             rpc_tls_meta_server_root_ca_cert: "".to_string(),
             rpc_tls_meta_service_domain_name: "localhost".to_string(),
         }
@@ -287,8 +302,8 @@ impl MetaConfig {
         }
     }
 
-    pub fn to_meta_grpc_client_conf(&self) -> MetaGrpcClientConf {
-        let meta_config = RpcClientConf {
+    pub fn to_meta_grpc_client_conf(&self) -> RpcClientConf {
+        RpcClientConf {
             address: self.address.clone(),
             endpoints: self.endpoints.clone(),
             username: self.username.clone(),
@@ -298,12 +313,13 @@ impl MetaConfig {
             } else {
                 None
             },
-        };
 
-        MetaGrpcClientConf {
-            meta_service_config: meta_config.clone(),
-            kv_service_config: meta_config,
-            client_timeout_in_second: self.client_timeout_in_second,
+            timeout: Some(Duration::from_secs(self.client_timeout_in_second)),
+            auto_sync_interval: if self.auto_sync_interval > 0 {
+                Some(Duration::from_secs(self.auto_sync_interval))
+            } else {
+                None
+            },
         }
     }
 }
@@ -317,6 +333,7 @@ impl Debug for MetaConfig {
             .field("password", &mask_string(&self.password, 3))
             .field("embedded_dir", &self.embedded_dir)
             .field("client_timeout_in_second", &self.client_timeout_in_second)
+            .field("auto_sync_interval", &self.auto_sync_interval)
             .field(
                 "rpc_tls_meta_server_root_ca_cert",
                 &self.rpc_tls_meta_server_root_ca_cert,

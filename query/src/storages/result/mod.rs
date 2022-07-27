@@ -12,11 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod block_buffer;
 mod download;
 mod result_locations;
 mod result_table;
+mod result_table_sink;
+mod result_table_source;
 mod writer;
 
 pub use result_table::ResultQueryInfo;
 pub use result_table::ResultTable;
+pub use result_table_sink::ResultTableSink;
 pub use writer::ResultTableWriter;

@@ -45,16 +45,17 @@ impl<'a> Binder {
         let mut scalars = HashMap::new();
         for item in select_list.items.iter() {
             let column_binding = if let Scalar::BoundColumnRef(ref column_ref) = item.scalar {
-                column_ref.column.clone()
-            } else {
-                let column_binding =
-                    self.create_column_binding(None, item.alias.clone(), item.scalar.data_type());
-                scalars.insert(column_binding.index, ScalarItem {
-                    scalar: item.scalar.clone(),
-                    index: column_binding.index,
-                });
+                let mut column_binding = column_ref.column.clone();
+                // We should apply alias for the ColumnBinding, since it comes from table
+                column_binding.column_name = item.alias.clone();
                 column_binding
+            } else {
+                self.create_column_binding(None, None, item.alias.clone(), item.scalar.data_type())
             };
+            scalars.insert(column_binding.index, ScalarItem {
+                scalar: item.scalar.clone(),
+                index: column_binding.index,
+            });
             columns.push(column_binding);
         }
 
@@ -73,7 +74,7 @@ impl<'a> Binder {
             .map(|(_, item)| {
                 if bind_context.in_grouping {
                     let mut grouping_checker = GroupingChecker::new(bind_context);
-                    let scalar = grouping_checker.resolve(&item.scalar)?;
+                    let scalar = grouping_checker.resolve(&item.scalar, None)?;
                     Ok(ScalarItem {
                         scalar,
                         index: item.index,
@@ -131,7 +132,8 @@ impl<'a> Binder {
                         let indirection = &names[0];
                         match indirection {
                             Indirection::Identifier(ident) => {
-                                let column_binding = input_context.resolve_column(None, ident)?;
+                                let column_binding =
+                                    input_context.resolve_column(None, None, ident)?;
                                 output.items.push(SelectItem {
                                     select_target,
                                     scalar: BoundColumnRef {
@@ -165,8 +167,9 @@ impl<'a> Binder {
                     }
                 }
                 SelectTarget::AliasedExpr { expr, alias } => {
-                    let scalar_binder = ScalarBinder::new(input_context, self.ctx.clone());
-                    let (bound_expr, _) = scalar_binder.bind_expr(expr).await?;
+                    let mut scalar_binder =
+                        ScalarBinder::new(input_context, self.ctx.clone(), self.metadata.clone());
+                    let (bound_expr, _) = scalar_binder.bind(expr).await?;
 
                     // If alias is not specified, we will generate a name for the scalar expression.
                     let expr_name = match alias {

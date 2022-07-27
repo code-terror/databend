@@ -19,7 +19,7 @@ use common_base::base::tokio;
 use common_datablocks::DataBlock;
 use common_datavalues::prelude::*;
 use common_exception::Result;
-use common_meta_types::TableMeta;
+use common_meta_app::schema::TableMeta;
 use common_planners::add;
 use common_planners::col;
 use common_planners::lit;
@@ -28,6 +28,7 @@ use common_planners::CreateTablePlan;
 use common_planners::Extras;
 use databend_query::catalogs::CATALOG_DEFAULT;
 use databend_query::interpreters::CreateTableInterpreter;
+use databend_query::interpreters::Interpreter;
 use databend_query::sessions::QueryContext;
 use databend_query::sql::OPT_KEY_DATABASE_ID;
 use databend_query::sql::OPT_KEY_SNAPSHOT_LOCATION;
@@ -50,6 +51,7 @@ async fn apply_block_pruning(
     BlockPruner::new(table_snapshot)
         .apply(ctx.as_ref(), schema, push_down)
         .await
+        .map(|v| v.into_iter().map(|(_, v)| v).collect())
 }
 
 #[tokio::test]
@@ -72,7 +74,7 @@ async fn test_block_pruner() -> Result<()> {
         catalog: "default".to_owned(),
         if_not_exists: false,
         tenant: fixture.default_tenant(),
-        db: fixture.default_db_name(),
+        database: fixture.default_db_name(),
         table: test_tbl_name.to_string(),
         table_meta: TableMeta {
             schema: test_schema.clone(),
@@ -86,7 +88,7 @@ async fn test_block_pruner() -> Result<()> {
             ..Default::default()
         },
         as_select: None,
-        order_keys: vec![],
+        cluster_keys: vec![],
     };
 
     let interpreter = CreateTableInterpreter::try_create(ctx.clone(), create_table_plan)?;
@@ -212,7 +214,7 @@ async fn test_block_pruner_monotonic() -> Result<()> {
         catalog: "default".to_owned(),
         if_not_exists: false,
         tenant: fixture.default_tenant(),
-        db: fixture.default_db_name(),
+        database: fixture.default_db_name(),
         table: test_tbl_name.to_string(),
         table_meta: TableMeta {
             schema: test_schema.clone(),
@@ -228,7 +230,7 @@ async fn test_block_pruner_monotonic() -> Result<()> {
             ..Default::default()
         },
         as_select: None,
-        order_keys: vec![],
+        cluster_keys: vec![],
     };
 
     let catalog = ctx.get_catalog("default")?;

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::sync::Arc;
 
 use common_datablocks::DataBlock;
@@ -58,6 +59,10 @@ impl<T: Transform + 'static> Processor for Transformer<T> {
         T::NAME
     }
 
+    fn as_any(&mut self) -> &mut dyn Any {
+        self
+    }
+
     fn event(&mut self) -> Result<Event> {
         match self.output.is_finished() {
             true => self.finish_input(),
@@ -76,10 +81,7 @@ impl<T: Transform + 'static> Processor for Transformer<T> {
     fn process(&mut self) -> Result<()> {
         if let Some(data_block) = self.input_data.take() {
             let data_block = self.transform.transform(data_block)?;
-
-            if !T::SKIP_EMPTY_DATA_BLOCK || !data_block.is_empty() {
-                self.output_data = Some(data_block);
-            }
+            self.output_data = Some(data_block);
         }
 
         Ok(())

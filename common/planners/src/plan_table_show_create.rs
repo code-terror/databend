@@ -14,12 +14,12 @@
 
 use common_datavalues::DataSchemaRef;
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ShowCreateTablePlan {
     /// The catalog name
     pub catalog: String,
     /// The database name
-    pub db: String,
+    pub database: String,
     /// The table name
     pub table: String,
     /// The table schema

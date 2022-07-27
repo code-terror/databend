@@ -31,6 +31,8 @@ use common_planners::ReadDataSourcePlan;
 use common_planners::SortPlan;
 use common_planners::StageKind;
 use common_planners::StagePlan;
+use common_planners::WindowFuncPlan;
+use enum_extract::let_extract;
 
 use crate::optimizers::Optimizer;
 use crate::sessions::QueryContext;
@@ -109,6 +111,66 @@ impl ScattersOptimizerImpl {
         }
     }
 
+    fn cluster_window(&mut self, plan: &WindowFuncPlan) -> Result<PlanNode> {
+        match self.input.take() {
+            None => Err(ErrorCode::LogicalError("Cluster window input is None")),
+            Some(input) => {
+                let_extract!(
+                    Expression::WindowFunction {
+                        op: _op,
+                        params: _params,
+                        args: _args,
+                        partition_by: partition_by,
+                        order_by: _order_by,
+                        window_frame: _window_frame
+                    },
+                    &plan.window_func,
+                    panic!()
+                );
+
+                let stage_input = if !partition_by.is_empty() {
+                    let mut concat_ws_args = vec![Expression::create_literal(DataValue::String(
+                        "#".as_bytes().to_vec(),
+                    ))];
+                    concat_ws_args.extend(partition_by.to_owned());
+                    let concat_partition_by =
+                        Expression::create_scalar_function("concat_ws", concat_ws_args);
+
+                    let scatters_expr =
+                        Expression::create_scalar_function("sipHash", vec![concat_partition_by]);
+
+                    PlanNode::Stage(StagePlan {
+                        scatters_expr,
+                        kind: StageKind::Normal,
+                        input,
+                    })
+                } else {
+                    self.running_mode = RunningMode::Standalone;
+                    PlanNode::Stage(StagePlan {
+                        scatters_expr: Expression::create_literal(DataValue::UInt64(0)),
+                        kind: StageKind::Merge,
+                        input,
+                    })
+                };
+
+                Ok(PlanNode::WindowFunc(WindowFuncPlan {
+                    window_func: plan.window_func.to_owned(),
+                    input: Arc::new(stage_input),
+                    schema: plan.schema.to_owned(),
+                }))
+            }
+        }
+    }
+
+    fn standalone_window(&mut self, plan: &WindowFuncPlan) -> Result<PlanNode> {
+        match self.input.take() {
+            None => Err(ErrorCode::LogicalError("Standalone window input is None")),
+            Some(input) => PlanBuilder::from(input.as_ref())
+                .window_func(plan.window_func.to_owned())?
+                .build(),
+        }
+    }
+
     fn cluster_sort(&mut self, plan: &SortPlan) -> Result<PlanNode> {
         // Order by we convergent it in local node
         self.running_mode = RunningMode::Standalone;
@@ -176,7 +238,7 @@ impl ScattersOptimizerImpl {
 
     fn convergent_shuffle_stage_builder(input: Arc<PlanNode>) -> PlanBuilder {
         PlanBuilder::from(&PlanNode::Stage(StagePlan {
-            kind: StageKind::Convergent,
+            kind: StageKind::Merge,
             scatters_expr: Expression::create_literal(DataValue::UInt64(0)),
             input,
         }))
@@ -184,7 +246,7 @@ impl ScattersOptimizerImpl {
 
     fn convergent_shuffle_stage(input: PlanNode) -> Result<PlanNode> {
         Ok(PlanNode::Stage(StagePlan {
-            kind: StageKind::Convergent,
+            kind: StageKind::Merge,
             scatters_expr: Expression::create_literal(DataValue::UInt64(0)),
             input: Arc::new(input),
         }))
@@ -251,6 +313,17 @@ impl PlanRewriter for ScattersOptimizerImpl {
         }
     }
 
+    fn rewrite_window_func(&mut self, plan: &WindowFuncPlan) -> Result<PlanNode> {
+        let new_input = Arc::new(self.rewrite_plan_node(&plan.input)?);
+
+        self.input = Some(new_input);
+
+        match self.running_mode {
+            RunningMode::Cluster => self.cluster_window(plan),
+            RunningMode::Standalone => self.standalone_window(plan),
+        }
+    }
+
     fn rewrite_sort(&mut self, plan: &SortPlan) -> Result<PlanNode> {
         self.input = Some(Arc::new(self.rewrite_plan_node(plan.input.as_ref())?));
 
@@ -308,16 +381,6 @@ impl Optimizer for ScattersOptimizer {
         }
 
         let mut optimizer_impl = ScattersOptimizerImpl::create(self.ctx.clone());
-        let rewrite_plan = optimizer_impl.rewrite_plan_node(plan)?;
-
-        // We need to converge at the end
-        match optimizer_impl.running_mode {
-            RunningMode::Standalone => Ok(rewrite_plan),
-            RunningMode::Cluster => Ok(PlanNode::Stage(StagePlan {
-                kind: StageKind::Convergent,
-                scatters_expr: Expression::create_literal(DataValue::UInt64(0)),
-                input: Arc::new(rewrite_plan),
-            })),
-        }
+        optimizer_impl.rewrite_plan_node(plan)
     }
 }

@@ -57,16 +57,18 @@ impl IfFunction {
         &self,
         cond_col: &ColumnRef,
         columns: &ColumnsWithField,
-        _func_ctx: &FunctionContext,
+        func_ctx: &FunctionContext,
     ) -> Result<ColumnRef> {
         debug_assert!(cond_col.is_const());
         // whether nullable or not, we can use viewer to make it
         let cond_viewer = bool::try_create_viewer(cond_col)?;
-        if cond_viewer.value_at(0) {
-            return Ok(columns[0].column().clone());
+        let c = if cond_viewer.value_at(0) {
+            columns[0].clone()
         } else {
-            return Ok(columns[1].column().clone());
-        }
+            columns[1].clone()
+        };
+
+        cast_column_field(&c, c.data_type(), &self.least_supertype, func_ctx)
     }
 
     // lhs is const column and:
@@ -109,7 +111,7 @@ impl IfFunction {
                 let l_val = left_viewer.value_at(0);
                 let rhs_viewer = $T::try_create_viewer(&rhs)?;
 
-                let mut builder: NullableColumnBuilder<$T> = NullableColumnBuilder::with_capacity(input_rows);
+                let mut builder: NullableColumnBuilder<$T> =  NullableColumnBuilder::with_capacity_meta(input_rows, lhs.column_meta());
 
                 let iter = cond_col.iter().zip(rhs_viewer.iter().enumerate());
 
@@ -216,7 +218,7 @@ impl IfFunction {
         with_match_scalar_type!(type_id.to_physical_type(), |$T| {
             let lhs_viewer = $T::try_create_viewer(&lhs)?;
             let rhs_viewer = $T::try_create_viewer(&rhs)?;
-            let mut builder = NullableColumnBuilder::<$T>::with_capacity(input_rows);
+            let mut builder = NullableColumnBuilder::<$T>::with_capacity_meta(input_rows, lhs.column_meta());
             for ((predicate, l), (row, r)) in cond_col
                 .iter()
                 .zip(lhs_viewer.iter())

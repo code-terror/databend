@@ -14,6 +14,9 @@
 
 #![feature(backtrace)]
 
+#[macro_use]
+mod macros;
+
 mod config;
 mod logging;
 mod panic_hook;
@@ -24,6 +27,7 @@ pub use logging::init_default_ut_tracing;
 pub use logging::init_global_tracing;
 pub use logging::init_meta_ut_tracing;
 pub use logging::init_query_logger;
+pub use panic_hook::log_panic;
 pub use panic_hook::set_panic_hook;
 pub use tracing;
 pub use tracing_appender;

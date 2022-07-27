@@ -16,6 +16,8 @@ use std::fmt::Display;
 use std::fmt::Formatter;
 
 use common_datavalues::IntervalKind;
+use common_exception::ErrorCode;
+use common_exception::Result;
 
 use crate::ast::write_comma_separated_list;
 use crate::ast::write_period_separated_list;
@@ -36,6 +38,13 @@ pub enum Expr<'a> {
     IsNull {
         span: &'a [Token<'a>],
         expr: Box<Expr<'a>>,
+        not: bool,
+    },
+    /// `IS [NOT] DISTINCT` expression
+    IsDistinctFrom {
+        span: &'a [Token<'a>],
+        left: Box<Expr<'a>>,
+        right: Box<Expr<'a>>,
         not: bool,
     },
     /// `[ NOT ] IN (expr, ...)`
@@ -143,11 +152,14 @@ pub enum Expr<'a> {
     /// `EXISTS` expression
     Exists {
         span: &'a [Token<'a>],
+        /// Indicate if this is a `NOT EXISTS`
+        not: bool,
         subquery: Box<Query<'a>>,
     },
-    /// Scalar subquery, which will only return a single row with a single column.
+    /// Scalar/ANY/ALL/SOME subquery
     Subquery {
         span: &'a [Token<'a>],
+        modifier: Option<SubqueryModifier>,
         subquery: Box<Query<'a>>,
     },
     /// Access elements of `Array`, `Object` and `Variant` by index or key, like `arr[0]`, or `obj:k1`
@@ -173,12 +185,48 @@ pub enum Expr<'a> {
         interval: Box<Expr<'a>>,
         unit: IntervalKind,
     },
+    DateSub {
+        span: &'a [Token<'a>],
+        date: Box<Expr<'a>>,
+        interval: Box<Expr<'a>>,
+        unit: IntervalKind,
+    },
+    DateTrunc {
+        span: &'a [Token<'a>],
+        unit: IntervalKind,
+        date: Box<Expr<'a>>,
+    },
+    /// NULLIF(<expr>, <expr>)
+    NullIf {
+        span: &'a [Token<'a>],
+        expr1: Box<Expr<'a>>,
+        expr2: Box<Expr<'a>>,
+    },
+    // Coalesce(<expr>, <expr>, ...)
+    Coalesce {
+        span: &'a [Token<'a>],
+        exprs: Vec<Expr<'a>>,
+    },
+    /// IFNULL(<expr>, <expr>)
+    IfNull {
+        span: &'a [Token<'a>],
+        expr1: Box<Expr<'a>>,
+        expr2: Box<Expr<'a>>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubqueryModifier {
+    Any,
+    All,
+    Some,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
-    // Numeric literal value
-    Number(String),
+    Integer(u64),
+    Float(f64),
+    BigInt { lit: String, is_hex: bool },
     // Quoted string literal value
     String(String),
     Boolean(bool),
@@ -219,14 +267,14 @@ pub enum TypeName {
     Variant,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrimWhere {
     Both,
     Leading,
     Trailing,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinaryOperator {
     Plus,
     Minus,
@@ -259,7 +307,23 @@ pub enum BinaryOperator {
     BitwiseXor,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl BinaryOperator {
+    pub fn to_contrary(&self) -> Result<Self> {
+        match &self {
+            BinaryOperator::Gt => Ok(BinaryOperator::Lte),
+            BinaryOperator::Lt => Ok(BinaryOperator::Gte),
+            BinaryOperator::Gte => Ok(BinaryOperator::Lt),
+            BinaryOperator::Lte => Ok(BinaryOperator::Gt),
+            BinaryOperator::Eq => Ok(BinaryOperator::NotEq),
+            BinaryOperator::NotEq => Ok(BinaryOperator::Eq),
+            _ => Err(ErrorCode::UnImplement(format!(
+                "Converting {self} to its relative is not currently supported"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnaryOperator {
     Plus,
     Minus,
@@ -269,30 +333,46 @@ pub enum UnaryOperator {
 impl<'a> Expr<'a> {
     pub fn span(&self) -> &'a [Token<'a>] {
         match self {
-            Expr::ColumnRef { span, .. } => span,
-            Expr::IsNull { span, .. } => span,
-            Expr::InList { span, .. } => span,
-            Expr::InSubquery { span, .. } => span,
-            Expr::Between { span, .. } => span,
-            Expr::BinaryOp { span, .. } => span,
-            Expr::UnaryOp { span, .. } => span,
-            Expr::Cast { span, .. } => span,
-            Expr::TryCast { span, .. } => span,
-            Expr::Extract { span, .. } => span,
-            Expr::Position { span, .. } => span,
-            Expr::Substring { span, .. } => span,
-            Expr::Trim { span, .. } => span,
-            Expr::Literal { span, .. } => span,
-            Expr::CountAll { span } => span,
-            Expr::Tuple { span, .. } => span,
-            Expr::FunctionCall { span, .. } => span,
-            Expr::Case { span, .. } => span,
-            Expr::Exists { span, .. } => span,
-            Expr::Subquery { span, .. } => span,
-            Expr::MapAccess { span, .. } => span,
-            Expr::Array { span, .. } => span,
-            Expr::Interval { span, .. } => span,
-            Expr::DateAdd { span, .. } => span,
+            Expr::ColumnRef { span, .. }
+            | Expr::IsNull { span, .. }
+            | Expr::IsDistinctFrom { span, .. }
+            | Expr::InList { span, .. }
+            | Expr::InSubquery { span, .. }
+            | Expr::Between { span, .. }
+            | Expr::BinaryOp { span, .. }
+            | Expr::UnaryOp { span, .. }
+            | Expr::Cast { span, .. }
+            | Expr::TryCast { span, .. }
+            | Expr::Extract { span, .. }
+            | Expr::Position { span, .. }
+            | Expr::Substring { span, .. }
+            | Expr::Trim { span, .. }
+            | Expr::Literal { span, .. }
+            | Expr::CountAll { span }
+            | Expr::Tuple { span, .. }
+            | Expr::FunctionCall { span, .. }
+            | Expr::Case { span, .. }
+            | Expr::Exists { span, .. }
+            | Expr::Subquery { span, .. }
+            | Expr::MapAccess { span, .. }
+            | Expr::Array { span, .. }
+            | Expr::Interval { span, .. }
+            | Expr::DateAdd { span, .. }
+            | Expr::DateSub { span, .. }
+            | Expr::DateTrunc { span, .. }
+            | Expr::NullIf { span, .. }
+            | Expr::Coalesce { span, .. }
+            | Expr::IfNull { span, .. } => span,
+        }
+    }
+}
+
+impl Display for SubqueryModifier {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SubqueryModifier::Any => write!(f, "ANY"),
+            SubqueryModifier::All => write!(f, "ALL"),
+            SubqueryModifier::Some => write!(f, "SOME"),
         }
     }
 }
@@ -476,8 +556,17 @@ impl Display for TrimWhere {
 impl Display for Literal {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Literal::Number(val) => {
+            Literal::Integer(val) => {
                 write!(f, "{val}")
+            }
+            Literal::Float(val) => {
+                write!(f, "{val}")
+            }
+            Literal::BigInt { lit, is_hex } => {
+                if *is_hex {
+                    write!(f, "0x")?;
+                }
+                write!(f, "{lit}")
             }
             Literal::String(val) => {
                 write!(f, "\'{val}\'")
@@ -524,6 +613,16 @@ impl<'a> Display for Expr<'a> {
                 }
                 write!(f, " NULL")?;
             }
+            Expr::IsDistinctFrom {
+                left, right, not, ..
+            } => {
+                write!(f, "{left} IS")?;
+                if *not {
+                    write!(f, " NOT")?;
+                }
+                write!(f, " DISTINCT FROM {right}")?;
+            }
+
             Expr::InList {
                 expr, list, not, ..
             } => {
@@ -677,7 +776,12 @@ impl<'a> Display for Expr<'a> {
             Expr::Exists { subquery, .. } => {
                 write!(f, "EXITS ({subquery})")?;
             }
-            Expr::Subquery { subquery, .. } => {
+            Expr::Subquery {
+                subquery, modifier, ..
+            } => {
+                if let Some(m) = modifier {
+                    write!(f, "{m} ")?;
+                }
                 write!(f, "({subquery})")?;
             }
             Expr::MapAccess { expr, accessor, .. } => {
@@ -703,6 +807,28 @@ impl<'a> Display for Expr<'a> {
                 ..
             } => {
                 write!(f, "DATE_ADD({date}, INTERVAL {interval} {unit})")?;
+            }
+            Expr::DateSub {
+                date,
+                interval,
+                unit,
+                ..
+            } => {
+                write!(f, "DATE_SUB({date}, INTERVAL {interval} {unit})")?;
+            }
+            Expr::DateTrunc { unit, date, .. } => {
+                write!(f, "DATE_TRUNC({unit}, {date})")?;
+            }
+            Expr::NullIf { expr1, expr2, .. } => {
+                write!(f, "NULLIF({expr1}, {expr2})")?;
+            }
+            Expr::Coalesce { exprs, .. } => {
+                write!(f, "COALESCE(")?;
+                write_comma_separated_list(f, exprs)?;
+                write!(f, ")")?;
+            }
+            Expr::IfNull { expr1, expr2, .. } => {
+                write!(f, "IFNULL({expr1}, {expr2})")?;
             }
         }
 

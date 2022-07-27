@@ -16,6 +16,7 @@ use common_exception::ErrorCode;
 use common_exception::Result;
 use common_io::prelude::*;
 use lexical_core::FromLexical;
+use micromarshal::Unmarshal;
 
 use crate::prelude::*;
 
@@ -88,7 +89,11 @@ where
         Ok(())
     }
 
-    fn de_text<R: BufferRead>(&mut self, reader: &mut R, _format: &FormatSettings) -> Result<()> {
+    fn de_text<R: BufferRead>(
+        &mut self,
+        reader: &mut NestedCheckpointReader<R>,
+        _format: &FormatSettings,
+    ) -> Result<()> {
         let v: T = if !T::FLOATING {
             reader.read_int_text()
         } else {
@@ -100,7 +105,7 @@ where
 
     fn de_text_csv<R: BufferRead>(
         &mut self,
-        reader: &mut R,
+        reader: &mut NestedCheckpointReader<R>,
         _settings: &FormatSettings,
     ) -> Result<()> {
         let maybe_quote = reader.ignore(|f| f == b'\'' || f == b'"')?;
