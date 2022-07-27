@@ -2,7 +2,7 @@
 FROM ubuntu:20.04 as builder
 ## Install build dependencies.
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y cmake clang curl git-all build-essential binutils-dev libunwind-dev libblocksruntime-dev liblzma-dev
+    DEBIAN_FRONTEND=noninteractive apt-get install -y pkg-config libssl-dev cmake clang curl git-all build-essential binutils-dev libunwind-dev libblocksruntime-dev liblzma-dev
 RUN curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 RUN ${HOME}/.cargo/bin/rustup default nightly
 RUN ${HOME}/.cargo/bin/cargo install honggfuzz
