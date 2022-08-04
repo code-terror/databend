@@ -11,33 +11,29 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-//
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
 
 use common_datavalues::DataValue;
 use common_exception::Result;
-
-use crate::storages::fuse::meta::BlockMeta;
-use crate::storages::fuse::meta::ColumnId;
-use crate::storages::fuse::meta::Statistics;
-use crate::storages::index::ColumnStatistics;
-use crate::storages::index::StatisticsOfColumns;
+use common_fuse_meta::meta::BlockMeta;
+use common_fuse_meta::meta::ColumnId;
+use common_fuse_meta::meta::ColumnStatistics;
+use common_fuse_meta::meta::Statistics;
+use common_fuse_meta::meta::StatisticsOfColumns;
 
 pub fn reduce_block_statistics<T: Borrow<StatisticsOfColumns>>(
-    stats: &[T],
+    stats_of_columns: &[T],
 ) -> Result<StatisticsOfColumns> {
     // Combine statistics of a column into `Vec`, that is:
     // from : `&[HashMap<ColumnId, ColumnStatistics>]`
     // to   : `HashMap<ColumnId, Vec<&ColumnStatistics>)>`
-    let col_stat_list = stats.iter().fold(HashMap::new(), |acc, item| {
+    let col_to_stats_lit = stats_of_columns.iter().fold(HashMap::new(), |acc, item| {
         item.borrow().iter().fold(
             acc,
-            |mut acc: HashMap<ColumnId, Vec<&ColumnStatistics>>, (col_id, stats)| {
-                acc.entry(*col_id)
-                    .or_insert_with(|| vec![stats])
-                    .push(stats);
+            |mut acc: HashMap<ColumnId, Vec<&ColumnStatistics>>, (col_id, col_stats)| {
+                acc.entry(*col_id).or_default().push(col_stats);
                 acc
             },
         )
@@ -46,8 +42,8 @@ pub fn reduce_block_statistics<T: Borrow<StatisticsOfColumns>>(
     // Reduce the `Vec<&ColumnStatistics` into ColumnStatistics`, i.e.:
     // from : `HashMap<ColumnId, Vec<&ColumnStatistics>)>`
     // to   : `type BlockStatistics = HashMap<ColumnId, ColumnStatistics>`
-    let len = stats.len();
-    col_stat_list
+    let len = stats_of_columns.len();
+    col_to_stats_lit
         .iter()
         .try_fold(HashMap::with_capacity(len), |mut acc, (id, stats)| {
             let mut min_stats = Vec::with_capacity(stats.len());
@@ -102,6 +98,7 @@ pub fn merge_statistics(l: &Statistics, r: &Statistics) -> Result<Statistics> {
         block_count: l.block_count + r.block_count,
         uncompressed_byte_size: l.uncompressed_byte_size + r.uncompressed_byte_size,
         compressed_byte_size: l.compressed_byte_size + r.compressed_byte_size,
+        index_size: l.index_size + r.index_size,
         col_stats: reduce_block_statistics(&[&l.col_stats, &r.col_stats])?,
     };
     Ok(s)
@@ -120,6 +117,7 @@ pub fn reduce_block_metas<T: Borrow<BlockMeta>>(block_metas: &[T]) -> Result<Sta
     let mut block_count: u64 = 0;
     let mut uncompressed_byte_size: u64 = 0;
     let mut compressed_byte_size: u64 = 0;
+    let mut index_size: u64 = 0;
 
     block_metas.iter().for_each(|b| {
         let b = b.borrow();
@@ -127,6 +125,7 @@ pub fn reduce_block_metas<T: Borrow<BlockMeta>>(block_metas: &[T]) -> Result<Sta
         block_count += 1;
         uncompressed_byte_size += b.block_size;
         compressed_byte_size += b.file_size;
+        index_size = b.bloom_filter_index_size;
     });
 
     let stats = block_metas
@@ -140,6 +139,7 @@ pub fn reduce_block_metas<T: Borrow<BlockMeta>>(block_metas: &[T]) -> Result<Sta
         block_count,
         uncompressed_byte_size,
         compressed_byte_size,
+        index_size,
         col_stats: merged_col_stats,
     })
 }

@@ -3,11 +3,12 @@ import collections
 import glob
 import os
 import re
+import time
 
 import six
-from hamcrest import assert_that, is_, none, is_not
 
 from log import log
+from statistics import global_statistics
 
 supports_labels = ['http', 'mysql', 'clickhouse']
 
@@ -93,13 +94,13 @@ def parse_token_args(tokens, arg):
 
 class LogicError(Exception):
 
-    def __init__(self, message, expected):
+    def __init__(self, message, errorType, runner):
         self.message = message
-        self.expected = expected
+        self.errorType = errorType
+        self.runner = runner
 
     def __str__(self):
-        return "Expected regex{}, Actual: {}".format(self.expected,
-                                                     self.message)
+        return f"Ruuner: {self.runner}\nErrorType: {self.errorType}\nMessage: {self.message}"
 
 
 class Statement:
@@ -124,12 +125,12 @@ class Statement:
                 qo = matched.group("queryOptions")
                 s = qo.split(" ", 1)
                 if len(s) < 1:
-                    raise Exception("Invalid query options: {}".format(qo))
+                    raise Exception(f"Invalid query options: {qo}")
                 if len(s) == 1:
                     if is_empty_line(s[0]):
                         raise Exception(
-                            "Invalid query options, query type should not be empty: {}"
-                            .format(qo))
+                            f"Invalid query options, query type should not be empty: {qo}"
+                        )
                     self.query_type = s[0]
                     return
                 query_type, options = qo.split(" ", 1)
@@ -146,16 +147,16 @@ class Statement:
                         self.retry = True
 
         else:
-            raise Exception("Unknown statement type {}".format(matched.group()))
+            raise Exception(f"Unknown statement type {matched.group()}")
 
     def __str__(self):
-        s = "Statement: {}, type: {}".format(self.type, self.query_type)
+        s = f"Statement: {self.type}, type: {self.query_type}"
         if self.type == "query":
             if self.query_type is not None:
-                s += ", query_type: {}".format(self.query_type)
+                s += f", query_type: {self.query_type}"
                 if self.label is not None:
-                    s += ", label: {}".format(self.label)
-                s += ", retry: {}".format(self.retry)
+                    s += f", label: {self.label}"
+                s += f", retry: {self.retry}"
 
         return s
 
@@ -219,20 +220,18 @@ def get_statements(suite_path, suite_name):
                 result_count = len(s.label) + 1
             for i in range(result_count):
                 results.append(get_result(lines))
-        yield ParsedStatement(line_idx, s, suite_name, text, results, runs_on)
+        yield ParsedStatement(line_idx + 1, s, suite_name, text, results,
+                              runs_on)
 
 
 def format_value(vals, val_num):
     row = len(vals) // val_num
-    width = len(str(vals[0])) + 2
-    for i in range(len(vals)):
-        width = max(width, len(vals[i]) + 2)
     table = ""
     for i in range(row):
         ans = []
         for j in range(val_num):
-            ans.append('{: >{w}}'.format(str(vals[i * val_num + j]), w=width))
-        table += "".join(ans)
+            ans.append(str(vals[i * val_num + j]))
+        table += "  ".join(ans)
         table += "\n"
     return table
 
@@ -249,61 +248,92 @@ def safe_execute(method, *info):
 @six.add_metaclass(abc.ABCMeta)
 class SuiteRunner(object):
 
-    def __init__(self, kind, pattern):
+    def __init__(self, kind, args):
         self.label = None
         self.retry_time = 3
-        self.driver = None
-        self.path = "./suites/"
+        self.driver = None     
         self.statement_files = []
         self.kind = kind
-        self.show_query_on_execution = True
+        self.show_query_on_execution = False
         self.on_error_return = False
-        self.pattern = pattern
+        self.dir = dir
+        self.args = args
 
     # return all files under the path
     # format: a list of file absolute path and name(relative path)
     def fetch_files(self):
-        skip_files = os.getenv("SKIP_TEST_FILES")
-        skip_tests = skip_files.split(",") if skip_files is not None else []
-        log.debug("Skip test file list {}".format(skip_tests))
-        for filename in glob.iglob('{}/**'.format(self.path), recursive=True):
+        log.debug(f"Skip test file list {self.args.skip}")
+        skips = self.args.skip
+
+        if type(skips) is str:
+            skips = skips.split(",")
+        
+        suite_path = self.args.suites
+
+        for filename in glob.iglob(f'{suite_path}/**', recursive=True):
             if os.path.isfile(filename):
-                if os.path.basename(filename) in skip_tests:
-                    log.info("Skip test file {}".format(filename))
+                base_name = os.path.basename(filename)
+                dirs = os.path.dirname(filename).split(os.sep)
+
+                if self.args.skip_dir and any(
+                        s in dirs for s in self.args.skip_dir):
+                    log.info(f"Skip test file {filename}, in dirs {self.args.skip_dir}")
                     continue
-                if re.match(self.pattern, filename):
+
+                if self.args.skip and any(
+                    [re.search(r, base_name) for r in skips]):
+                    log.info(f"Skip test file {filename}")
+                    continue
+
+                if self.args.run_dir and not any(s in dirs for s in self.args.run_dir):
+                    log.info(f"Skip test file {filename}, not in run dir {self.args.run_dir}")
+                    continue
+
+                if not self.args.pattern or any(
+                    [re.search(r, base_name) for r in self.args.pattern]):
                     self.statement_files.append(
-                        (filename, os.path.relpath(filename, self.path)))
+                        (filename, os.path.relpath(filename, suite_path)))
+
         self.statement_files.sort()
 
     def execute(self):
-        # batch execute use single session
-        if callable(getattr(self, "batch_execute")):
-            # case batch
-            for (file_path, suite_name) in self.statement_files:
-                log.info("Batch execute, suite name:{} in file {}".format(
-                    suite_name, file_path))
-                statement_list = list()
-                for state in get_statements(file_path, suite_name):
-                    statement_list.append(state)
-                self.batch_execute(statement_list)
-        else:
-            # case one by one
-            for (file_path, suite_name) in self.statement_files:
-                log.info("One by one execute, suite name:{} in file {}".format(
-                    suite_name, file_path))
-                for state in get_statements(file_path, suite_name):
-                    self.execute_statement(state)
+        for i in range(0, self.args.test_runs):
+            # batch execute use single session
+            if callable(getattr(self, "batch_execute")):
+                # case batch
+                for (file_path, suite_name) in self.statement_files:
+                    self.suite_now = suite_name
+                    statement_list = list()
+                    for state in get_statements(file_path, suite_name):
+                        statement_list.append(state)
+
+                    try:
+                        self.batch_execute(statement_list)
+                    except Exception as e:
+                        log.warning(
+                            f"Get exception when running suite {suite_name}")
+                        global_statistics.add_failed(self.kind, self.suite_now,
+                                                     e)
+                        continue
+
+                    log.info(
+                        f"Suite file:{file_path} pass!"
+                    )
+            else:
+                raise RuntimeError(
+                    f"batch_execute is not implement in runner {self.kind}")
 
     def execute_statement(self, statement):
         if self.kind not in statement.runs_on:
-            log.info(
-                "Skip execute statement with {} SuiteRunner, only runs on {}".
-                format(self.kind, statement.runs_on))
+            log.debug(
+                f"Skip execute statement with {self.kind} SuiteRunner, only runs on {statement.runs_on}"
+            )
             return
         if self.show_query_on_execution:
-            log.info("executing statement, type {}\n{}\n".format(
-                statement.s_type.type, statement.text))
+            log.Info(
+                f"executing statement, type {statement.s_type.type}\n{statement.text}\n"
+            )
+        start = time.perf_counter()
         if statement.s_type.type == "query":
             self.assert_execute_query(statement)
         elif statement.s_type.type == "error":
@@ -312,39 +342,53 @@ class SuiteRunner(object):
             self.assert_execute_ok(statement)
         else:
             raise Exception("Unknown statement type")
+        end = time.perf_counter()
+        time_cost = end - start
+        global_statistics.add_perf(self.kind, self.suite_now, statement.text,
+                                   time_cost)
 
     # expect the query just return ok
     def assert_execute_ok(self, statement):
         actual = safe_execute(lambda: self.execute_ok(statement.text),
                               statement)
-        assert_that(
-            actual,
-            is_(none()),
-            str(statement),
-        )
+        if actual is not None:
+            raise LogicError(
+                runner=self.kind,
+                message=str(statement),
+                errorType="statement ok get error in response"
+            )
 
     def assert_query_equal(self, f, resultset, statement):
         # use join after split instead of strip
         compare_f = "".join(f.split())
         compare_result = "".join(resultset[2].split())
-        assert compare_f == compare_result, "Expected:\n{}\n Actual:\n{}\n Statement:{}\n Start " \
+        if compare_f != compare_result:
+            raise LogicError(message="\n Expected:\n{:<80}\n Actual:\n{:<80}\n Statement:{}\n Start " \
                                             "Line: {}, Result Label: {}".format(resultset[2].rstrip(),
                                                                                 f.rstrip(),
                                                                                 str(statement), resultset[1],
-                                                                                resultset[0].group("label"))
+                                                                                resultset[0].group("label")),
+                            errorType="statement query get result not equal to expected",
+                            runner=self.kind,
+                            )
 
     def assert_execute_query(self, statement):
         if statement.s_type.query_type == "skipped":
-            log.warning("{} statement is skipped".format(statement))
+            log.debug(f"{statement.text} statement is skipped")
             return
         actual = safe_execute(lambda: self.execute_query(statement), statement)
         try:
             f = format_value(actual, len(statement.s_type.query_type))
         except Exception:
-            assert "{} statement type is query but get no result".format(
-                statement)
-        assert statement.results is not None and len(
-            statement.results) > 0, "No result found {}".format(statement)
+            raise LogicError(
+                message=f"{statement} statement type is query but get no result",
+                errorType="statement query get no result",
+                runner=self.kind)
+
+        if statement.results is None or len(statement.results) == 0:
+            raise LogicError(message=f"{statement} no result found by query",
+                             errorType="statement query get empty result",
+                             runner=self.kind)
         hasResult = False
         for resultset in statement.results:
             if resultset[0].group("label") is not None and resultset[0].group(
@@ -357,23 +401,31 @@ class SuiteRunner(object):
                         resultset[0].group("label")) == 0:
                     self.assert_query_equal(f, resultset, statement)
                     hasResult = True
-        assert hasResult, "No result found {}".format(statement)
+        if not hasResult:
+            raise LogicError(message=f"{statement} no result found in test file",
+                             errorType="statement query has no result in test file",
+                             runner=self.kind)
 
     # expect the query just return error
     def assert_execute_error(self, statement):
         actual = safe_execute(lambda: self.execute_error(statement.text),
                               statement)
         if actual is None:
-            raise Exception("Expected error but got none")
+            raise LogicError(message=f"{str(statement)}",
+            errorType="statement error get no error message",
+            runner=self.kind)
         match = re.search(statement.s_type.expect_error, actual.msg)
-        assert_that(
-            match, is_not(none()),
-            "statement {}, expect error regex {}, found {}".format(
-                str(statement), statement.s_type.expect_error, actual))
+        if match is None:
+            raise LogicError(
+                message=
+                f"\n expected error regex is {statement.s_type.expect_error}\n actual found {actual}{str(statement)}",
+                errorType=f"statement error get error message not equal to expected",
+                runner=self.kind)
 
     def run_sql_suite(self):
-        log.info("run_sql_suite for {} on base {}".format(
-            self.kind, os.path.abspath(self.path)))
+        log.info(
+            f"run_sql_suite for {self.kind} with suites dir {os.path.abspath(self.args.suites)}"
+        )
         self.fetch_files()
         self.execute()
 

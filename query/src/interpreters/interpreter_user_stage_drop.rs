@@ -19,12 +19,12 @@ use common_meta_types::StageType;
 use common_planners::DropUserStagePlan;
 use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
-use common_tracing::tracing;
-use common_tracing::tracing::info;
+use tracing::info;
 
 use crate::interpreters::Interpreter;
 use crate::sessions::QueryContext;
-use crate::storages::stage::StageSource;
+use crate::sessions::TableContext;
+use crate::storages::stage::StageSourceHelper;
 
 #[derive(Debug)]
 pub struct DropUserStageInterpreter {
@@ -44,11 +44,8 @@ impl Interpreter for DropUserStageInterpreter {
         "DropUserStageInterpreter"
     }
 
-    #[tracing::instrument(level = "info", skip(self, _input_stream), fields(ctx.id = self.ctx.get_id().as_str()))]
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    #[tracing::instrument(level = "info", skip(self), fields(ctx.id = self.ctx.get_id().as_str()))]
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         let plan = self.plan.clone();
         let tenant = self.ctx.get_tenant();
         let user_mgr = self.ctx.get_user_manager();
@@ -60,7 +57,8 @@ impl Interpreter for DropUserStageInterpreter {
 
         if let Ok(stage) = stage {
             if matches!(&stage.stage_type, StageType::Internal) {
-                let op = StageSource::get_op(&self.ctx, &stage).await?;
+                let rename_me_qry_ctx: Arc<dyn TableContext> = self.ctx.clone();
+                let op = StageSourceHelper::get_op(&rename_me_qry_ctx, &stage).await?;
                 let absolute_path = format!("/stage/{}/", stage.stage_name);
                 op.batch().remove_all(&absolute_path).await?;
                 info!(

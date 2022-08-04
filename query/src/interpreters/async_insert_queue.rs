@@ -35,17 +35,18 @@ use parking_lot::RwLock;
 use super::InsertInterpreter;
 use super::SelectInterpreter;
 use crate::interpreters::Interpreter;
-use crate::pipelines::new::executor::PipelineCompleteExecutor;
-use crate::pipelines::new::processors::port::InputPort;
-use crate::pipelines::new::processors::port::OutputPort;
-use crate::pipelines::new::processors::BlocksSource;
-use crate::pipelines::new::SinkPipeBuilder;
-use crate::pipelines::new::SourcePipeBuilder;
+use crate::pipelines::executor::PipelineCompleteExecutor;
+use crate::pipelines::processors::port::InputPort;
+use crate::pipelines::processors::port::OutputPort;
+use crate::pipelines::processors::BlocksSource;
+use crate::pipelines::processors::ContextSink;
+use crate::pipelines::SinkPipeBuilder;
+use crate::pipelines::SourcePipeBuilder;
 use crate::sessions::QueryContext;
 use crate::sessions::SessionManager;
 use crate::sessions::SessionType;
 use crate::sessions::Settings;
-use crate::storages::memory::MemoryTableSink;
+use crate::sessions::TableContext;
 
 #[derive(Clone)]
 pub struct InsertKey {
@@ -277,7 +278,7 @@ impl AsyncInsertQueue {
                     let input_port = InputPort::create();
                     sink_pipeline_builder.add_sink(
                         input_port.clone(),
-                        MemoryTableSink::create(input_port, ctx.clone()),
+                        ContextSink::create(input_port, ctx.clone()),
                     );
                 }
                 pipeline.add_pipe(sink_pipeline_builder.finalize());
@@ -414,7 +415,7 @@ impl AsyncInsertQueue {
         builder.add_source(output_port.clone(), source);
 
         interpreter.set_source_pipe_builder(Some(builder))?;
-        interpreter.execute(None).await?;
+        interpreter.execute().await?;
         Ok(())
     }
 

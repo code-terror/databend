@@ -21,7 +21,7 @@ use common_meta_app::schema::TableIdent;
 use common_meta_app::schema::TableInfo;
 use common_meta_app::schema::TableMeta;
 
-use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 use crate::storages::system::table::AsyncOneBlockSystemTable;
 use crate::storages::system::table::AsyncSystemTable;
 use crate::storages::Table;
@@ -38,7 +38,7 @@ impl AsyncSystemTable for UsersTable {
         &self.table_info
     }
 
-    async fn get_full_data(&self, ctx: Arc<QueryContext>) -> Result<DataBlock> {
+    async fn get_full_data(&self, ctx: Arc<dyn TableContext>) -> Result<DataBlock> {
         let tenant = ctx.get_tenant();
         let users = ctx.get_user_manager().get_users(&tenant).await?;
 
@@ -52,12 +52,22 @@ impl AsyncSystemTable for UsersTable {
             .iter()
             .map(|x| x.auth_info.get_auth_string())
             .collect();
+        let default_roles: Vec<String> = users
+            .iter()
+            .map(|x| {
+                x.option
+                    .default_role()
+                    .cloned()
+                    .unwrap_or_else(|| "".to_string())
+            })
+            .collect();
 
         Ok(DataBlock::create(self.table_info.schema(), vec![
             Series::from_data(names),
             Series::from_data(hostnames),
             Series::from_data(auth_types),
             Series::from_data(auth_strings),
+            Series::from_data(default_roles),
         ]))
     }
 }
@@ -69,6 +79,7 @@ impl UsersTable {
             DataField::new("hostname", Vu8::to_data_type()),
             DataField::new("auth_type", Vu8::to_data_type()),
             DataField::new("auth_string", Vu8::to_data_type()),
+            DataField::new("default_role", Vu8::to_data_type()),
         ]);
 
         let table_info = TableInfo {

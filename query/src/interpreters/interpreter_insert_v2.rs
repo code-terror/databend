@@ -15,28 +15,26 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use chrono_tz::Tz;
-use common_base::base::TrySpawn;
 use common_datavalues::DataType;
 use common_exception::ErrorCode;
 use common_exception::Result;
 use common_functions::scalars::CastFunction;
-use common_functions::scalars::FunctionContext;
 use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
 use parking_lot::Mutex;
 
+use super::commit2table;
+use super::interpreter_common::append2table;
 use crate::interpreters::Interpreter;
 use crate::interpreters::InterpreterPtr;
 use crate::interpreters::SelectInterpreterV2;
-use crate::pipelines::new::executor::PipelineCompleteExecutor;
-use crate::pipelines::new::processors::port::OutputPort;
-use crate::pipelines::new::processors::BlocksSource;
-use crate::pipelines::new::processors::TransformAddOn;
-use crate::pipelines::new::processors::TransformCastSchema;
-use crate::pipelines::new::NewPipeline;
-use crate::pipelines::new::SourcePipeBuilder;
+use crate::pipelines::processors::port::OutputPort;
+use crate::pipelines::processors::BlocksSource;
+use crate::pipelines::processors::TransformCastSchema;
+use crate::pipelines::Pipeline;
+use crate::pipelines::SourcePipeBuilder;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 use crate::sql::plans::Insert;
 use crate::sql::plans::InsertInputSource;
 use crate::sql::plans::Plan;
@@ -62,10 +60,7 @@ impl InsertInterpreterV2 {
         }))
     }
 
-    async fn execute_new(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    async fn execute_new(&self) -> Result<SendableDataBlockStream> {
         let plan = &self.plan;
         let settings = self.ctx.get_settings();
         let table = self
@@ -110,6 +105,7 @@ impl InsertInterpreterV2 {
                             s_expr,
                             metadata,
                             bind_context,
+                            ..
                         } => SelectInterpreterV2::try_create(
                             self.ctx.clone(),
                             *bind_context.clone(),
@@ -134,21 +130,11 @@ impl InsertInterpreterV2 {
                             let target_type_name = target_field.data_type().name();
                             let from_type = original_field.data_type().clone();
                             let cast_function =
-                                CastFunction::create("cast", &target_type_name, from_type).unwrap();
+                                CastFunction::create("cast", &target_type_name, from_type)?;
                             functions.push(cast_function);
                         }
-                        let tz = self.ctx.get_settings().get_timezone()?;
-                        let tz = String::from_utf8(tz).map_err(|_| {
-                            ErrorCode::LogicalError(
-                                "Timezone has been checked and should be valid.",
-                            )
-                        })?;
-                        let tz = tz.parse::<Tz>().map_err(|_| {
-                            ErrorCode::InvalidTimezone(
-                                "Timezone has been checked and should be valid",
-                            )
-                        })?;
-                        let func_ctx = FunctionContext { tz };
+
+                        let func_ctx = self.ctx.try_get_function_context()?;
                         pipeline.add_transform(|transform_input_port, transform_output_port| {
                             TransformCastSchema::try_create(
                                 transform_input_port,
@@ -163,51 +149,8 @@ impl InsertInterpreterV2 {
             };
         }
 
-        let need_fill_missing_columns = table.schema() != plan.schema();
-        if need_fill_missing_columns {
-            pipeline.add_transform(|transform_input_port, transform_output_port| {
-                TransformAddOn::try_create(
-                    transform_input_port,
-                    transform_output_port,
-                    self.plan.schema(),
-                    table.schema(),
-                    self.ctx.clone(),
-                )
-            })?;
-        }
-
-        table.append2(self.ctx.clone(), &mut pipeline)?;
-
-        let async_runtime = self.ctx.get_storage_runtime();
-        let query_need_abort = self.ctx.query_need_abort();
-
-        pipeline.set_max_threads(self.ctx.get_settings().get_max_threads()? as usize);
-        let executor =
-            PipelineCompleteExecutor::try_create(async_runtime, query_need_abort, pipeline)?;
-
-        executor.execute()?;
-        drop(executor);
-
-        let overwrite = self.plan.overwrite;
-        let catalog_name = self.plan.catalog.clone();
-        let context = self.ctx.clone();
-        let append_entries = self.ctx.consume_precommit_blocks();
-
-        // We must put the commit operation to global runtime, which will avoid the "dispatch dropped without returning error" in tower
-        let handler = self.ctx.get_storage_runtime().spawn(async move {
-            table
-                .commit_insertion(context, &catalog_name, append_entries, overwrite)
-                .await
-        });
-
-        match handler.await {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(cause)) => Err(cause),
-            Err(cause) => Err(ErrorCode::PanicError(format!(
-                "Maybe panic while in commit insert. {}",
-                cause
-            ))),
-        }?;
+        append2table(self.ctx.clone(), table.clone(), plan.schema(), pipeline)?;
+        commit2table(self.ctx.clone(), table.clone(), self.plan.overwrite).await?;
 
         Ok(Box::pin(DataBlockStream::create(
             self.plan.schema(),
@@ -239,15 +182,12 @@ impl Interpreter for InsertInterpreterV2 {
         "InsertIntoInterpreter"
     }
 
-    async fn execute(
-        &self,
-        input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
-        self.execute_new(input_stream).await
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
+        self.execute_new().await
     }
 
-    async fn create_new_pipeline(&self) -> Result<NewPipeline> {
-        let insert_pipeline = NewPipeline::create();
+    async fn create_new_pipeline(&self) -> Result<Pipeline> {
+        let insert_pipeline = Pipeline::create();
         Ok(insert_pipeline)
     }
 

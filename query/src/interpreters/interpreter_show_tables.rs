@@ -26,6 +26,7 @@ use crate::interpreters::Interpreter;
 use crate::interpreters::SelectInterpreter;
 use crate::optimizers::Optimizers;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 use crate::sql::PlanParser;
 
 pub struct ShowTablesInterpreter {
@@ -110,17 +111,14 @@ impl Interpreter for ShowTablesInterpreter {
         "ShowTablesInterpreter"
     }
 
-    async fn execute(
-        &self,
-        input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         let query = self.build_query()?;
         let plan = PlanParser::parse(self.ctx.clone(), &query).await?;
         let optimized = Optimizers::create(self.ctx.clone()).optimize(&plan)?;
 
         if let PlanNode::Select(plan) = optimized {
             let interpreter = SelectInterpreter::try_create(self.ctx.clone(), plan)?;
-            interpreter.execute(input_stream).await
+            interpreter.execute().await
         } else {
             return Err(ErrorCode::LogicalError("Show tables build query error"));
         }
@@ -161,11 +159,7 @@ impl SimpleSelectBuilder {
     fn build(self) -> String {
         let columns = {
             let s = self.columns.join(",");
-            if !s.is_empty() {
-                s
-            } else {
-                "*".to_owned()
-            }
+            if !s.is_empty() { s } else { "*".to_owned() }
         };
 
         let order_bys = {

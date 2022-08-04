@@ -23,6 +23,7 @@ use common_streams::SendableDataBlockStream;
 
 use crate::interpreters::Interpreter;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 
 pub struct RenameDatabaseInterpreter {
     ctx: Arc<QueryContext>,
@@ -41,10 +42,7 @@ impl Interpreter for RenameDatabaseInterpreter {
         "RenameDatabaseInterpreter"
     }
 
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         for entity in &self.plan.entities {
             let catalog = self.ctx.get_catalog(&entity.catalog)?;
             let tenant = self.plan.tenant.clone();

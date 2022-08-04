@@ -22,6 +22,12 @@ default = ["simd"]
 memory-profiling = ["common-base/memory-profiling", "common-http/memory-profiling"]
 simd = ["common-arrow/simd"]
 tokio-console = ["common-tracing/console", "common-base/tracing"]
+io-uring = [
+    "sled/io_uring",
+    "common-meta-store/io-uring",
+    "common-meta-sled-store/io-uring",
+    "common-meta-raft-store/io-uring",
+]
 
 [dependencies]
 # Workspace dependencies
@@ -35,6 +41,7 @@ common-meta-api = { path = "../common/meta/api" }
 common-meta-grpc = { path = "../common/meta/grpc" }
 common-meta-raft-store = { path = "../common/meta/raft-store" }
 common-meta-sled-store = { path = "../common/meta/sled-store" }
+common-meta-store = { path = "../common/meta/store" }
 common-meta-types = { path = "../common/meta/types" }
 common-tracing = { path = "../common/tracing" }
 
@@ -62,6 +69,9 @@ tempfile = "3.3.0"
 tokio-stream = "0.1.9"
 tonic = { version = "0.7.2", features = ["tls"] }
 tonic-reflection = "0.4.0"
+tracing = "0.1.35"
+tracing-appender = "0.2.2"
+tracing-subscriber = { version = "0.3.11", features = ["env-filter", "ansi"] }
 
 [dev-dependencies]
 common-meta-api = { path = "../common/meta/api" }

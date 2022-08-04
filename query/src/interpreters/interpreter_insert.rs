@@ -15,13 +15,10 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use chrono_tz::Tz;
-use common_base::base::TrySpawn;
 use common_datavalues::DataType;
 use common_exception::ErrorCode;
 use common_exception::Result;
 use common_functions::scalars::CastFunction;
-use common_functions::scalars::FunctionContext;
 use common_planners::InsertInputSource;
 use common_planners::InsertPlan;
 use common_planners::PlanNode;
@@ -30,16 +27,17 @@ use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
 use parking_lot::Mutex;
 
+use super::commit2table;
+use super::interpreter_common::append2table;
 use crate::interpreters::Interpreter;
 use crate::interpreters::SelectInterpreter;
-use crate::pipelines::new::executor::PipelineCompleteExecutor;
-use crate::pipelines::new::processors::port::OutputPort;
-use crate::pipelines::new::processors::BlocksSource;
-use crate::pipelines::new::processors::TransformAddOn;
-use crate::pipelines::new::processors::TransformCastSchema;
-use crate::pipelines::new::NewPipeline;
-use crate::pipelines::new::SourcePipeBuilder;
+use crate::pipelines::processors::port::OutputPort;
+use crate::pipelines::processors::BlocksSource;
+use crate::pipelines::processors::TransformCastSchema;
+use crate::pipelines::Pipeline;
+use crate::pipelines::SourcePipeBuilder;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 
 pub struct InsertInterpreter {
     ctx: Arc<QueryContext>,
@@ -85,11 +83,7 @@ impl Interpreter for InsertInterpreter {
         "InsertIntoInterpreter"
     }
 
-    async fn execute(
-        &self,
-        input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
-        let _input_stream = input_stream;
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         let plan = &self.plan;
         let settings = self.ctx.get_settings();
         let table = self
@@ -148,18 +142,7 @@ impl Interpreter for InsertInterpreter {
                                 CastFunction::create("cast", &target_type_name, from_type).unwrap();
                             functions.push(cast_function);
                         }
-                        let tz = self.ctx.get_settings().get_timezone()?;
-                        let tz = String::from_utf8(tz).map_err(|_| {
-                            ErrorCode::LogicalError(
-                                "Timezone has been checked and should be valid.",
-                            )
-                        })?;
-                        let tz = tz.parse::<Tz>().map_err(|_| {
-                            ErrorCode::InvalidTimezone(
-                                "Timezone has been checked and should be valid",
-                            )
-                        })?;
-                        let func_ctx = FunctionContext { tz };
+                        let func_ctx = self.ctx.try_get_function_context()?;
                         pipeline.add_transform(|transform_input_port, transform_output_port| {
                             TransformCastSchema::try_create(
                                 transform_input_port,
@@ -173,44 +156,9 @@ impl Interpreter for InsertInterpreter {
                 }
             };
         }
-        let need_fill_missing_columns = table.schema() != plan.schema();
-        if need_fill_missing_columns {
-            pipeline.add_transform(|transform_input_port, transform_output_port| {
-                TransformAddOn::try_create(
-                    transform_input_port,
-                    transform_output_port,
-                    self.plan.schema(),
-                    table.schema(),
-                    self.ctx.clone(),
-                )
-            })?;
-        }
-        table.append2(self.ctx.clone(), &mut pipeline)?;
-        let async_runtime = self.ctx.get_storage_runtime();
-        let query_need_abort = self.ctx.query_need_abort();
-        pipeline.set_max_threads(self.ctx.get_settings().get_max_threads()? as usize);
-        let executor =
-            PipelineCompleteExecutor::try_create(async_runtime, query_need_abort, pipeline)?;
-        executor.execute()?;
-        drop(executor);
-        let overwrite = self.plan.overwrite;
-        let catalog_name = self.plan.catalog.clone();
-        let context = self.ctx.clone();
-        let append_entries = self.ctx.consume_precommit_blocks();
-        let handler = self.ctx.get_storage_runtime().spawn(async move {
-            table
-                .commit_insertion(context, &catalog_name, append_entries, overwrite)
-                .await
-        });
-        match handler.await {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(cause)) => Err(cause),
-            Err(cause) => Err(ErrorCode::PanicError(format!(
-                "Maybe panic while in commit insert. {}",
-                cause
-            ))),
-        }?;
 
+        append2table(self.ctx.clone(), table.clone(), plan.schema(), pipeline)?;
+        commit2table(self.ctx.clone(), table.clone(), plan.overwrite).await?;
         Ok(Box::pin(DataBlockStream::create(
             self.plan.schema(),
             None,
@@ -218,8 +166,8 @@ impl Interpreter for InsertInterpreter {
         )))
     }
 
-    async fn create_new_pipeline(&self) -> Result<NewPipeline> {
-        let insert_pipeline = NewPipeline::create();
+    async fn create_new_pipeline(&self) -> Result<Pipeline> {
+        let insert_pipeline = Pipeline::create();
         Ok(insert_pipeline)
     }
 

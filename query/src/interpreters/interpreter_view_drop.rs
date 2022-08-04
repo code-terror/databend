@@ -26,6 +26,7 @@ use common_streams::SendableDataBlockStream;
 
 use crate::interpreters::Interpreter;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 use crate::storages::view::view_table::VIEW_ENGINE;
 
 pub struct DropViewInterpreter {
@@ -45,10 +46,7 @@ impl Interpreter for DropViewInterpreter {
         "DropViewInterpreter"
     }
 
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         let catalog_name = self.plan.catalog.clone();
         let db_name = self.plan.database.clone();
         let viewname = self.plan.viewname.clone();

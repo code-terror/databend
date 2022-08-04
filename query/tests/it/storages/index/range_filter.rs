@@ -17,13 +17,13 @@ use std::collections::HashMap;
 use common_base::base::tokio;
 use common_datavalues::prelude::*;
 use common_exception::Result;
+use common_fuse_meta::meta::ColumnStatistics;
+use common_fuse_meta::meta::StatisticsOfColumns;
 use common_planners::*;
 use databend_query::storages::index::range_filter::build_verifiable_expr;
 use databend_query::storages::index::range_filter::left_bound_for_like_pattern;
 use databend_query::storages::index::range_filter::right_bound_for_like_pattern;
 use databend_query::storages::index::range_filter::StatColumns;
-use databend_query::storages::index::range_filter::StatisticsOfColumns;
-use databend_query::storages::index::ColumnStatistics;
 use databend_query::storages::index::RangeFilter;
 
 use crate::tests::create_query_context;
@@ -154,8 +154,7 @@ async fn test_range_filter() -> Result<()> {
             name: "a - b <= -10",
             expr: sub(col("a"), col("b")).lt_eq(lit(-10i32)),
             expect: true,
-            error:
-                "Code: 1067, displayText = Function '-' is not monotonic in the variables range.",
+            error: "Code: 1067, displayText = Function '-' is not monotonic in the variables range.",
         },
         Test {
             name: "a < b",
@@ -167,6 +166,24 @@ async fn test_range_filter() -> Result<()> {
             name: "a + 9 < b",
             expr: add(col("a"), lit(9)).lt(col("b")),
             expect: false,
+            error: "",
+        },
+        Test {
+            name: "a > 1 and d > 2",
+            expr: col("a").gt(lit(1)).and(col("d").gt(lit(2))),
+            expect: true,
+            error: "",
+        },
+        Test {
+            name: "a > 100 or d > 2",
+            expr: col("a").gt(lit(100)).or(col("d").gt(lit(2))),
+            expect: true,
+            error: "",
+        },
+        Test {
+            name: "a > 100 or a + d > 2",
+            expr: col("a").gt(lit(100)).or(add(col("a"), col("d")).gt(lit(2))),
+            expect: true,
             error: "",
         },
     ];

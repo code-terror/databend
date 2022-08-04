@@ -28,6 +28,7 @@ use common_streams::SendableDataBlockStream;
 
 use crate::interpreters::Interpreter;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 use crate::storages::view::view_table::VIEW_ENGINE;
 
 pub struct CreateViewInterpreter {
@@ -47,7 +48,7 @@ impl Interpreter for CreateViewInterpreter {
         "CreateViewInterpreter"
     }
 
-    async fn execute(&self, _: Option<SendableDataBlockStream>) -> Result<SendableDataBlockStream> {
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         // check privilige
         self.ctx
             .get_current_session()

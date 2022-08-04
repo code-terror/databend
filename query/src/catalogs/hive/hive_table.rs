@@ -14,7 +14,12 @@
 
 use std::sync::Arc;
 
+use async_recursion::async_recursion;
+use common_base::base::tokio;
+use common_base::base::tokio::sync::Semaphore;
 use common_datablocks::DataBlock;
+use common_datavalues::DataField;
+use common_datavalues::DataSchema;
 use common_datavalues::DataSchemaRef;
 use common_exception::ErrorCode;
 use common_exception::Result;
@@ -25,28 +30,29 @@ use common_planners::Partitions;
 use common_planners::ReadDataSourcePlan;
 use common_planners::Statistics;
 use common_planners::TruncateTablePlan;
-use common_streams::SendableDataBlockStream;
-use common_tracing::tracing_futures::Instrument;
-use futures::StreamExt;
 use futures::TryStreamExt;
 use opendal::ObjectMode;
+use opendal::Operator;
 
+use super::hive_partition_pruner::HivePartitionPruner;
 use super::hive_table_options::HiveTableOptions;
+use super::HiveCatalog;
+use crate::catalogs::catalog_manager::CATALOG_HIVE;
+use crate::catalogs::hive::hive_partition_filler::HivePartitionFiller;
 use crate::catalogs::hive::hive_table_source::HiveTableSource;
 use crate::catalogs::hive::HivePartInfo;
-use crate::pipelines::new::processors::port::OutputPort;
-use crate::pipelines::new::processors::processor::ProcessorPtr;
-use crate::pipelines::new::processors::SyncSource;
-use crate::pipelines::new::processors::SyncSourcer;
-use crate::pipelines::new::NewPipe;
-use crate::pipelines::new::NewPipeline;
-use crate::pipelines::new::SourcePipeBuilder;
-use crate::sessions::QueryContext;
+use crate::pipelines::processors::port::OutputPort;
+use crate::pipelines::processors::processor::ProcessorPtr;
+use crate::pipelines::processors::SyncSource;
+use crate::pipelines::processors::SyncSourcer;
+use crate::pipelines::Pipeline;
+use crate::pipelines::SourcePipeBuilder;
+use crate::sessions::TableContext;
 use crate::storages::hive::HiveParquetBlockReader;
 use crate::storages::Table;
 use crate::storages::TableStatistics;
 
-///! Dummy implementation for HIVE TABLE
+/// ! Dummy implementation for HIVE TABLE
 
 pub const HIVE_TABLE_ENGIE: &str = "hive";
 
@@ -64,12 +70,36 @@ impl HiveTable {
         })
     }
 
+    fn filter_hive_partition_from_partition_keys(
+        &self,
+        projections: Vec<usize>,
+    ) -> (Vec<usize>, Vec<DataField>) {
+        let partition_keys = &self.table_options.partition_keys;
+        match partition_keys {
+            Some(partition_keys) => {
+                let schema = self.table_info.schema();
+                let mut not_partitions = vec![];
+                let mut partition_fields = vec![];
+                for i in projections.into_iter() {
+                    let field = schema.field(i);
+                    if !partition_keys.contains(field.name()) {
+                        not_partitions.push(i);
+                    } else {
+                        partition_fields.push(field.clone());
+                    }
+                }
+                (not_partitions, partition_fields)
+            }
+            None => (projections, vec![]),
+        }
+    }
+
     #[inline]
     pub fn do_read2(
         &self,
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         plan: &ReadDataSourcePlan,
-        pipeline: &mut NewPipeline,
+        pipeline: &mut Pipeline,
     ) -> Result<()> {
         let push_downs = &plan.push_downs;
         let block_reader = self.create_block_reader(&ctx, push_downs)?;
@@ -94,7 +124,7 @@ impl HiveTable {
 
     fn create_block_reader(
         &self,
-        ctx: &Arc<QueryContext>,
+        ctx: &Arc<dyn TableContext>,
         push_downs: &Option<Extras>,
     ) -> Result<Arc<HiveParquetBlockReader>> {
         let projection = if let Some(Extras {
@@ -109,25 +139,67 @@ impl HiveTable {
                 .collect::<Vec<usize>>()
         };
 
+        let (projection, partition_fields) =
+            self.filter_hive_partition_from_partition_keys(projection);
+
+        let hive_partition_filler = if !partition_fields.is_empty() {
+            Some(HivePartitionFiller::create(partition_fields))
+        } else {
+            None
+        };
+
         let operator = ctx.get_storage_operator()?;
         let table_schema = self.table_info.schema();
         // todo, support csv, orc format
-        HiveParquetBlockReader::create(operator, table_schema, projection)
+        HiveParquetBlockReader::create(operator, table_schema, projection, hive_partition_filler)
     }
 
-    async fn do_read_partitions(
-        &self,
-        ctx: Arc<QueryContext>,
-        _push_downs: Option<Extras>,
-    ) -> Result<(Statistics, Partitions)> {
-        if let Some(partition_keys) = &self.table_options.partition_keys {
-            if !partition_keys.is_empty() {
-                return Err(ErrorCode::UnImplement(format!(
-                    "{}, not suport query for partitioned hive table, partitions:{:?}",
-                    self.table_info.name, self.table_options.partition_keys,
-                )));
-            }
+    fn get_column_schemas(&self, columns: Vec<String>) -> Result<Arc<DataSchema>> {
+        let mut fields = Vec::with_capacity(columns.len());
+        for column in columns {
+            let schema = self.table_info.schema();
+            let data_field = schema.field_with_name(&column)?;
+            fields.push(data_field.clone());
         }
+
+        Ok(Arc::new(DataSchema::new(fields)))
+    }
+
+    async fn get_query_locations_from_partition_table(
+        &self,
+        ctx: Arc<dyn TableContext>,
+        partition_keys: Vec<String>,
+        filters: &[Expression],
+        location: String,
+    ) -> Result<Vec<(String, Option<String>)>> {
+        let hive_catalog = ctx.get_catalog(CATALOG_HIVE)?;
+        let hive_catalog = hive_catalog.as_any().downcast_ref::<HiveCatalog>().unwrap();
+
+        // todo may use get_partition_names_ps to filter
+        let table_info = self.table_info.desc.split('.').collect::<Vec<&str>>();
+        let mut partitions = hive_catalog
+            .get_partition_names_async(table_info[0].to_string(), table_info[1].to_string(), -1)
+            .await?;
+
+        if !filters.is_empty() {
+            let partition_schemas = self.get_column_schemas(partition_keys.clone())?;
+            let partition_pruner =
+                HivePartitionPruner::create(ctx, filters[0].clone(), partition_schemas);
+            partitions = partition_pruner.prune(partitions)?;
+        }
+
+        let partitions = partitions
+            .into_iter()
+            .map(|part| (format!("{}{}/", location, part), Some(part)))
+            .collect::<Vec<(String, Option<String>)>>();
+        Ok(partitions)
+    }
+
+    async fn get_query_locations(
+        &self,
+        ctx: Arc<dyn TableContext>,
+        push_downs: &Option<Extras>,
+    ) -> Result<Vec<(String, Option<String>)>> {
         let path = match &self.table_options.location {
             Some(path) => path,
             None => {
@@ -139,36 +211,74 @@ impl HiveTable {
         };
         let location = convert_hdfs_path(path, true);
 
-        let operator = ctx.get_storage_operator()?;
-        let object = operator.object(&location);
-        let mut m = object.list().await?;
-
-        // todo:  use rowgroup level partition
-        let mut partitions = vec![];
-        while let Some(de) = m.try_next().await? {
-            let path = de.path();
-            match de.mode() {
-                ObjectMode::FILE => {
-                    // skip hidden files
-                    if !(path.starts_with('.') || path.starts_with('_')) {
-                        partitions.push(HivePartInfo::create(path.to_string()));
+        if let Some(partition_keys) = &self.table_options.partition_keys {
+            if !partition_keys.is_empty() {
+                if let Some(extras) = push_downs {
+                    if extras.filters.len() > 1 {
+                        return Err(ErrorCode::UnImplement(format!(
+                            "more than one filters, {:?}",
+                            extras.filters
+                        )));
                     }
-                }
-                // todo: read data from dirs recursively
-                ObjectMode::DIR => {
-                    return Err(ErrorCode::UnImplement(format!(
-                        "not suport to read data from dir {}",
-                        path
-                    )));
-                }
-                _ => {
-                    return Err(ErrorCode::ReadTableDataError(format!(
-                        "{} couldn't get file mode",
-                        path
-                    )));
+                    return self
+                        .get_query_locations_from_partition_table(
+                            ctx.clone(),
+                            partition_keys.clone(),
+                            &extras.filters,
+                            location.clone(),
+                        )
+                        .await;
                 }
             }
         }
+
+        Ok(vec![(location, None)])
+    }
+
+    #[tracing::instrument(level = "info", skip(self, ctx))]
+    async fn list_files_from_dirs(
+        &self,
+        ctx: Arc<dyn TableContext>,
+        dirs: Vec<(String, Option<String>)>,
+    ) -> Result<Vec<(String, Option<String>)>> {
+        let operator = ctx.get_storage_operator()?;
+
+        let sem = Arc::new(Semaphore::new(60));
+
+        let mut tasks = Vec::with_capacity(dirs.len());
+        for (dir, partition) in dirs {
+            let sem_t = sem.clone();
+            let operator_t = operator.clone();
+            let dir_t = dir.to_string();
+            let task =
+                tokio::spawn(async move { list_files_from_dir(operator_t, dir_t, sem_t).await });
+            tasks.push((task, partition));
+        }
+
+        let mut all_files = vec![];
+        for (task, partition) in tasks {
+            let files = task.await.unwrap()?;
+            for file in files {
+                all_files.push((file, partition.clone()));
+            }
+        }
+
+        Ok(all_files)
+    }
+
+    #[tracing::instrument(level = "info", skip(self, ctx))]
+    async fn do_read_partitions(
+        &self,
+        ctx: Arc<dyn TableContext>,
+        push_downs: Option<Extras>,
+    ) -> Result<(Statistics, Partitions)> {
+        let dirs = self.get_query_locations(ctx.clone(), &push_downs).await?;
+        let all_files = self.list_files_from_dirs(ctx, dirs).await?;
+
+        let partitions = all_files
+            .into_iter()
+            .map(|(filename, partition)| HivePartInfo::create(filename, partition))
+            .collect();
 
         Ok((Default::default(), partitions))
     }
@@ -198,7 +308,7 @@ impl Table for HiveTable {
 
     async fn read_partitions(
         &self,
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         push_downs: Option<Extras>,
     ) -> Result<(Statistics, Partitions)> {
         self.do_read_partitions(ctx, push_downs).await
@@ -210,28 +320,16 @@ impl Table for HiveTable {
 
     fn read2(
         &self,
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         plan: &ReadDataSourcePlan,
-        pipeline: &mut NewPipeline,
+        pipeline: &mut Pipeline,
     ) -> Result<()> {
         self.do_read2(ctx, plan, pipeline)
     }
 
-    async fn append_data(
-        &self,
-        _ctx: Arc<QueryContext>,
-        _stream: SendableDataBlockStream,
-    ) -> Result<SendableDataBlockStream> {
-        Err(ErrorCode::UnImplement(format!(
-            "append operation for table {} is not implemented, table engine is {}",
-            self.name(),
-            self.get_table_info().meta.engine
-        )))
-    }
-
     async fn commit_insertion(
         &self,
-        _ctx: Arc<QueryContext>,
+        _ctx: Arc<dyn TableContext>,
         _catalog_name: &str,
         _operations: Vec<DataBlock>,
         _overwrite: bool,
@@ -245,7 +343,7 @@ impl Table for HiveTable {
 
     async fn truncate(
         &self,
-        _ctx: Arc<QueryContext>,
+        _ctx: Arc<dyn TableContext>,
         _truncate_plan: TruncateTablePlan,
     ) -> Result<()> {
         Err(ErrorCode::UnImplement(format!(
@@ -254,11 +352,11 @@ impl Table for HiveTable {
         )))
     }
 
-    async fn optimize(&self, _ctx: Arc<QueryContext>, _keep_last_snapshot: bool) -> Result<()> {
+    async fn optimize(&self, _ctx: Arc<dyn TableContext>, _keep_last_snapshot: bool) -> Result<()> {
         Ok(())
     }
 
-    async fn statistics(&self, _ctx: Arc<QueryContext>) -> Result<Option<TableStatistics>> {
+    async fn statistics(&self, _ctx: Arc<dyn TableContext>) -> Result<Option<TableStatistics>> {
         Ok(None)
     }
 }
@@ -270,8 +368,9 @@ struct HiveSource {
 }
 
 impl HiveSource {
+    #[allow(dead_code)]
     pub fn create(
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         output: Arc<OutputPort>,
         schema: DataSchemaRef,
     ) -> Result<ProcessorPtr> {
@@ -359,4 +458,66 @@ mod tests {
             assert_eq!(path, *expected_path);
         }
     }
+}
+
+#[async_recursion]
+async fn list_files_from_dir(
+    operator: Operator,
+    location: String,
+    sem: Arc<Semaphore>,
+) -> Result<Vec<String>> {
+    let (files, dirs) = do_list_files_from_dir(operator.clone(), location, sem.clone()).await?;
+    let mut all_files = files;
+    let mut tasks = Vec::with_capacity(dirs.len());
+    for dir in dirs {
+        let sem_t = sem.clone();
+        let operator_t = operator.clone();
+        let task = tokio::spawn(async move { list_files_from_dir(operator_t, dir, sem_t).await });
+        tasks.push(task);
+    }
+
+    // let dir_files = tasks.map(|task| task.await.unwrap()).flatten().collect::<Vec<_>>();
+    // all_files.extend(dir_files);
+
+    for task in tasks {
+        let files = task.await.unwrap()?;
+        all_files.extend(files);
+    }
+
+    Ok(all_files)
+}
+
+async fn do_list_files_from_dir(
+    operator: Operator,
+    location: String,
+    sem: Arc<Semaphore>,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let _a = sem.acquire().await.unwrap();
+    let object = operator.object(&location);
+    let mut m = object.list().await?;
+
+    let mut all_files = vec![];
+    let mut all_dirs = vec![];
+    while let Some(de) = m.try_next().await? {
+        let path = de.path();
+        let file_offset = path.rfind('/').unwrap_or_default() + 1;
+        if path[file_offset..].starts_with('.') || path[file_offset..].starts_with('_') {
+            continue;
+        }
+        match de.mode() {
+            ObjectMode::FILE => {
+                all_files.push(path.to_string());
+            }
+            ObjectMode::DIR => {
+                all_dirs.push(path.to_string());
+            }
+            _ => {
+                return Err(ErrorCode::ReadTableDataError(format!(
+                    "{} couldn't get file mode",
+                    path
+                )));
+            }
+        }
+    }
+    Ok((all_files, all_dirs))
 }

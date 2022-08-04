@@ -30,6 +30,7 @@ use common_exception::Result;
 use common_planners::Expression;
 
 use crate::catalogs::CATALOG_DEFAULT;
+use crate::sessions::TableContext;
 use crate::sql::binder::scalar::ScalarBinder;
 use crate::sql::binder::Binder;
 use crate::sql::binder::ColumnBinding;
@@ -172,7 +173,7 @@ impl<'a> Binder {
                 alias,
             } => {
                 let mut scalar_binder =
-                    ScalarBinder::new(bind_context, self.ctx.clone(), self.metadata.clone());
+                    ScalarBinder::new(bind_context, self.ctx.clone(), self.metadata.clone(), &[]);
                 let mut args = Vec::with_capacity(params.len());
                 for arg in params.iter() {
                     args.push(scalar_binder.bind(arg).await?);
@@ -260,6 +261,7 @@ impl<'a> Binder {
                 LogicalGet {
                     table_index,
                     columns: columns.into_iter().map(|col| col.column_index).collect(),
+                    push_down_predicates: None,
                 }
                 .into(),
             ),
@@ -294,7 +296,7 @@ impl<'a> Binder {
             TimeTravelPoint::Snapshot(s) => Ok(NavigationPoint::SnapshotID(s.to_owned())),
             TimeTravelPoint::Timestamp(expr) => {
                 let mut type_checker =
-                    TypeChecker::new(bind_context, self.ctx.clone(), self.metadata.clone());
+                    TypeChecker::new(bind_context, self.ctx.clone(), self.metadata.clone(), &[]);
                 let box (scalar, data_type) = type_checker
                     .resolve(expr, Some(TimestampType::new_impl(6)))
                     .await?;

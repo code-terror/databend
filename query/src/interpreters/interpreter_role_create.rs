@@ -19,10 +19,10 @@ use common_meta_types::RoleInfo;
 use common_planners::CreateRolePlan;
 use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
-use common_tracing::tracing;
 
 use crate::interpreters::Interpreter;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 
 #[derive(Debug)]
 pub struct CreateRoleInterpreter {
@@ -42,11 +42,8 @@ impl Interpreter for CreateRoleInterpreter {
         "CreateRoleInterpreter"
     }
 
-    #[tracing::instrument(level = "debug", skip(self, _input_stream), fields(ctx.id = self.ctx.get_id().as_str()))]
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    #[tracing::instrument(level = "debug", skip(self), fields(ctx.id = self.ctx.get_id().as_str()))]
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         // TODO: add privilege check about CREATE ROLE
         let plan = self.plan.clone();
         let tenant = self.ctx.get_tenant();

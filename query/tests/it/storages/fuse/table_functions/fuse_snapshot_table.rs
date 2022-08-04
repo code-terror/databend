@@ -11,7 +11,6 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-//
 
 use common_base::base::tokio;
 use common_datablocks::DataBlock;
@@ -81,7 +80,7 @@ async fn test_fuse_snapshot_table_read() -> Result<()> {
     // test db & table
     let create_table_plan = fixture.default_crate_table_plan();
     let interpreter = CreateTableInterpreter::try_create(ctx.clone(), create_table_plan)?;
-    interpreter.execute(None).await?;
+    interpreter.execute().await?;
 
     // func args
     let arg_db = Expression::create_literal(DataValue::String(db.as_bytes().to_vec()));

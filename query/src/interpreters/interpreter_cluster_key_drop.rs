@@ -23,6 +23,7 @@ use common_streams::SendableDataBlockStream;
 
 use super::Interpreter;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 
 pub struct DropTableClusterKeyInterpreter {
     ctx: Arc<QueryContext>,
@@ -41,10 +42,7 @@ impl Interpreter for DropTableClusterKeyInterpreter {
         "DropTableClusterKeyInterpreter"
     }
 
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         let plan = &self.plan;
         self.ctx
             .get_current_session()

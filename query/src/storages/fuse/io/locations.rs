@@ -11,20 +11,22 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-//
 
 use std::marker::PhantomData;
 
 use common_datablocks::DataBlock;
 use common_exception::Result;
+use common_fuse_meta::meta::BlockBloomFilterIndex;
+use common_fuse_meta::meta::Location;
+use common_fuse_meta::meta::SegmentInfo;
+use common_fuse_meta::meta::SnapshotVersion;
+use common_fuse_meta::meta::Versioned;
 use uuid::Uuid;
 
 use crate::storages::fuse::constants::FUSE_TBL_BLOCK_PREFIX;
 use crate::storages::fuse::constants::FUSE_TBL_SEGMENT_PREFIX;
 use crate::storages::fuse::constants::FUSE_TBL_SNAPSHOT_PREFIX;
-use crate::storages::fuse::meta::SegmentInfo;
-use crate::storages::fuse::meta::SnapshotVersion;
-use crate::storages::fuse::meta::Versioned;
+use crate::storages::fuse::FUSE_TBL_BLOCK_INDEX_PREFIX;
 
 static SNAPSHOT_V0: SnapshotVersion = SnapshotVersion::V0(PhantomData);
 static SNAPSHOT_V1: SnapshotVersion = SnapshotVersion::V1(PhantomData);
@@ -43,14 +45,33 @@ impl TableMetaLocationGenerator {
         &self.prefix
     }
 
-    pub fn gen_block_location(&self) -> String {
-        let part_uuid = Uuid::new_v4().simple().to_string();
-        format!(
-            "{}/{}/{}_v{}.parquet",
-            &self.prefix,
-            FUSE_TBL_BLOCK_PREFIX,
+    pub fn gen_block_location(&self) -> (Location, Uuid) {
+        let part_uuid = Uuid::new_v4();
+        (
+            (
+                format!(
+                    "{}/{}/{}_v{}.parquet",
+                    &self.prefix,
+                    FUSE_TBL_BLOCK_PREFIX,
+                    part_uuid.as_simple(),
+                    DataBlock::VERSION,
+                ),
+                DataBlock::VERSION,
+            ),
             part_uuid,
-            DataBlock::VERSION,
+        )
+    }
+
+    pub fn block_bloom_index_location(&self, block_id: &Uuid) -> Location {
+        (
+            format!(
+                "{}/{}/{}_v{}.parquet",
+                &self.prefix,
+                FUSE_TBL_BLOCK_INDEX_PREFIX,
+                block_id.as_simple(),
+                BlockBloomFilterIndex::VERSION,
+            ),
+            BlockBloomFilterIndex::VERSION,
         )
     }
 

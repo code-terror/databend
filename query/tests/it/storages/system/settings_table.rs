@@ -14,6 +14,7 @@
 
 use common_base::base::tokio;
 use common_exception::Result;
+use databend_query::sessions::TableContext;
 use databend_query::storages::system::SettingsTable;
 use databend_query::storages::TableStreamReadWrap;
 use databend_query::storages::ToReadDataSourcePlan;
@@ -29,7 +30,6 @@ async fn test_settings_table() -> Result<()> {
 
     let stream = table.read(ctx, &source_plan).await?;
     let result = stream.try_collect::<Vec<_>>().await?;
-
     let expected = vec![
         "+--------------------------------+---------+---------+---------+----------------------------------------------------------------------------------------------------+--------+",
         "| name                           | value   | default | level   | description                                                                                        | type   |",

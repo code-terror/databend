@@ -24,9 +24,7 @@ use common_ast::ast::SQLProperty;
 use common_ast::ast::ShowCreateDatabaseStmt;
 use common_ast::ast::ShowDatabasesStmt;
 use common_ast::ast::ShowLimit;
-use common_ast::parser::parse_sql;
-use common_ast::parser::tokenize_sql;
-use common_ast::Backtrace;
+use common_ast::ast::UndropDatabaseStmt;
 use common_datavalues::DataField;
 use common_datavalues::DataSchemaRefExt;
 use common_datavalues::ToDataType;
@@ -38,9 +36,12 @@ use common_planners::DropDatabasePlan;
 use common_planners::RenameDatabaseEntity;
 use common_planners::RenameDatabasePlan;
 use common_planners::ShowCreateDatabasePlan;
+use common_planners::UndropDatabasePlan;
 
+use crate::sessions::TableContext;
 use crate::sql::binder::Binder;
 use crate::sql::plans::Plan;
+use crate::sql::plans::RewriteKind;
 use crate::sql::BindContext;
 
 impl<'a> Binder {
@@ -62,10 +63,9 @@ impl<'a> Binder {
             None => (),
         }
         write!(query, " ORDER BY name").unwrap();
-        let tokens = tokenize_sql(query.as_str())?;
-        let backtrace = Backtrace::new();
-        let (stmt, _) = parse_sql(&tokens, &backtrace)?;
-        self.bind_statement(bind_context, &stmt).await
+
+        self.bind_rewrite_to_query(bind_context, query.as_str(), RewriteKind::ShowDatabases)
+            .await
     }
 
     pub(in crate::sql::planner::binder) async fn bind_show_create_database(
@@ -146,6 +146,26 @@ impl<'a> Binder {
 
         Ok(Plan::DropDatabase(Box::new(DropDatabasePlan {
             if_exists: *if_exists,
+            tenant,
+            catalog,
+            database,
+        })))
+    }
+
+    pub(in crate::sql::planner::binder) async fn bind_undrop_database(
+        &self,
+        stmt: &UndropDatabaseStmt<'a>,
+    ) -> Result<Plan> {
+        let UndropDatabaseStmt { catalog, database } = stmt;
+
+        let tenant = self.ctx.get_tenant();
+        let catalog = catalog
+            .as_ref()
+            .map(|catalog| catalog.name.to_lowercase())
+            .unwrap_or_else(|| self.ctx.get_current_catalog());
+        let database = database.name.to_lowercase();
+
+        Ok(Plan::UndropDatabase(Box::new(UndropDatabasePlan {
             tenant,
             catalog,
             database,

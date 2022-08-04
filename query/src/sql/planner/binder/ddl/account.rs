@@ -30,6 +30,7 @@ use common_planners::GrantRolePlan;
 use common_planners::RevokePrivilegePlan;
 use common_planners::RevokeRolePlan;
 
+use crate::sessions::TableContext;
 use crate::sql::plans::Plan;
 use crate::sql::Binder;
 
@@ -149,10 +150,10 @@ impl<'a> Binder {
             if_not_exists,
             user,
             auth_option,
-            role_options,
+            user_options,
         } = stmt;
         let mut user_option = UserOption::default();
-        for option in role_options {
+        for option in user_options {
             option.apply(&mut user_option);
         }
         let plan = CreateUserPlan {
@@ -171,7 +172,7 @@ impl<'a> Binder {
         let AlterUserStmt {
             user,
             auth_option,
-            role_options,
+            user_options,
         } = stmt;
         // None means current user
         let user_info = if user.is_none() {
@@ -198,7 +199,7 @@ impl<'a> Binder {
         };
 
         let mut user_option = user_info.option.clone();
-        for option in role_options {
+        for option in user_options {
             option.apply(&mut user_option);
         }
         let new_user_option = if user_option == user_info.option {

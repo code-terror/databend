@@ -81,13 +81,14 @@ impl FromToProto<pb::UserOption> for mt::UserOption {
     where Self: Sized {
         check_ver(p.ver, p.min_compatible)?;
 
-        let flags = BitFlags::<mt::UserOptionFlag, u64>::from_bits(p.flags);
-        match flags {
-            Ok(flags) => Ok(mt::UserOption::new(flags)),
-            Err(e) => Err(Incompatible {
+        let flags =
+            BitFlags::<mt::UserOptionFlag, u64>::from_bits(p.flags).map_err(|e| Incompatible {
                 reason: format!("UserOptionFlag error: {}", e),
-            }),
-        }
+            })?;
+
+        Ok(mt::UserOption::default()
+            .with_flags(flags)
+            .with_default_role(p.default_role))
     }
 
     fn to_pb(&self) -> Result<pb::UserOption, Incompatible> {
@@ -95,6 +96,7 @@ impl FromToProto<pb::UserOption> for mt::UserOption {
             ver: VER,
             min_compatible: MIN_COMPATIBLE_VER,
             flags: self.flags().bits(),
+            default_role: self.default_role().cloned(),
         })
     }
 }
@@ -301,7 +303,9 @@ impl FromToProto<pb::user_stage_info::StageFileFormatType> for mt::StageFileForm
     where Self: Sized {
         match p {
             pb::user_stage_info::StageFileFormatType::Csv => Ok(mt::StageFileFormatType::Csv),
+            pb::user_stage_info::StageFileFormatType::Tsv => Ok(mt::StageFileFormatType::Tsv),
             pb::user_stage_info::StageFileFormatType::Json => Ok(mt::StageFileFormatType::Json),
+            pb::user_stage_info::StageFileFormatType::NdJson => Ok(mt::StageFileFormatType::NdJson),
             pb::user_stage_info::StageFileFormatType::Avro => Ok(mt::StageFileFormatType::Avro),
             pb::user_stage_info::StageFileFormatType::Orc => Ok(mt::StageFileFormatType::Orc),
             pb::user_stage_info::StageFileFormatType::Parquet => {
@@ -314,7 +318,9 @@ impl FromToProto<pb::user_stage_info::StageFileFormatType> for mt::StageFileForm
     fn to_pb(&self) -> Result<pb::user_stage_info::StageFileFormatType, Incompatible> {
         match *self {
             mt::StageFileFormatType::Csv => Ok(pb::user_stage_info::StageFileFormatType::Csv),
+            mt::StageFileFormatType::Tsv => Ok(pb::user_stage_info::StageFileFormatType::Tsv),
             mt::StageFileFormatType::Json => Ok(pb::user_stage_info::StageFileFormatType::Json),
+            mt::StageFileFormatType::NdJson => Ok(pb::user_stage_info::StageFileFormatType::NdJson),
             mt::StageFileFormatType::Avro => Ok(pb::user_stage_info::StageFileFormatType::Avro),
             mt::StageFileFormatType::Orc => Ok(pb::user_stage_info::StageFileFormatType::Orc),
             mt::StageFileFormatType::Parquet => {

@@ -14,6 +14,7 @@
 
 use common_arrow::arrow::chunk::Chunk;
 use common_arrow::arrow::datatypes::DataType as ArrowDataType;
+use common_arrow::arrow::io::parquet::write::transverse;
 use common_arrow::arrow::io::parquet::write::RowGroupIterator;
 use common_arrow::arrow::io::parquet::write::WriteOptions;
 use common_arrow::parquet::compression::CompressionOptions;
@@ -21,40 +22,43 @@ use common_arrow::parquet::encoding::Encoding;
 use common_arrow::parquet::metadata::ThriftFileMetaData;
 use common_arrow::parquet::write::Version;
 use common_arrow::write_parquet_file;
-use common_datavalues::DataSchemaRef;
+use common_datavalues::DataSchema;
 use common_exception::ErrorCode;
 use common_exception::Result;
 
 use crate::DataBlock;
 
-pub fn serialize_data_blocks(
+pub fn serialize_data_blocks_with_compression(
     blocks: Vec<DataBlock>,
-    schema: &DataSchemaRef,
+    schema: impl AsRef<DataSchema>,
     buf: &mut Vec<u8>,
+    compression: CompressionOptions,
 ) -> Result<(u64, ThriftFileMetaData)> {
-    let arrow_schema = schema.to_arrow();
+    let arrow_schema = schema.as_ref().to_arrow();
 
     let row_group_write_options = WriteOptions {
         write_statistics: false,
-        compression: CompressionOptions::Lz4Raw,
+        compression,
         version: Version::V2,
     };
     let batches = blocks
-        .iter()
-        .map(|b| Chunk::try_from(b.clone()))
+        .into_iter()
+        .map(Chunk::try_from)
         .collect::<Result<Vec<_>>>()?;
+
+    let encoding_map = |data_type: &ArrowDataType| match data_type {
+        ArrowDataType::Dictionary(..) => Encoding::RleDictionary,
+        _ => col_encoding(data_type),
+    };
 
     let encodings: Vec<Vec<_>> = arrow_schema
         .fields
         .iter()
-        .map(|f| match f.data_type() {
-            ArrowDataType::Dictionary(..) => vec![Encoding::RleDictionary],
-            _ => vec![col_encoding(f.data_type())],
-        })
-        .collect();
+        .map(|f| transverse(&f.data_type, encoding_map))
+        .collect::<Vec<_>>();
 
     let row_groups = RowGroupIterator::try_new(
-        batches.iter().map(|c| Ok(c.clone())),
+        batches.into_iter().map(Ok),
         &arrow_schema,
         row_group_write_options,
         encodings,
@@ -72,11 +76,19 @@ pub fn serialize_data_blocks(
     }
 }
 
+pub fn serialize_data_blocks(
+    blocks: Vec<DataBlock>,
+    schema: impl AsRef<DataSchema>,
+    buf: &mut Vec<u8>,
+) -> Result<(u64, ThriftFileMetaData)> {
+    serialize_data_blocks_with_compression(blocks, schema, buf, CompressionOptions::Lz4Raw)
+}
+
 fn col_encoding(_data_type: &ArrowDataType) -> Encoding {
     // Although encoding does work, parquet2 has not implemented decoding of DeltaLengthByteArray yet, we fallback to Plain
     // From parquet2: Decoding "DeltaLengthByteArray"-encoded required V2 pages is not yet implemented for Binary.
     //
-    //match data_type {
+    // match data_type {
     //    ArrowDataType::Binary
     //    | ArrowDataType::LargeBinary
     //    | ArrowDataType::Utf8

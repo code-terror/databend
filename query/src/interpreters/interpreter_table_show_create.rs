@@ -20,10 +20,11 @@ use common_exception::Result;
 use common_planners::ShowCreateTablePlan;
 use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
-use common_tracing::tracing;
+use tracing::debug;
 
 use crate::interpreters::Interpreter;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 use crate::sql::is_internal_opt_key;
 use crate::sql::PlanParser;
 
@@ -44,10 +45,11 @@ impl Interpreter for ShowCreateTableInterpreter {
         "ShowCreateTableInterpreter"
     }
 
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    fn schema(&self) -> DataSchemaRef {
+        self.plan.schema()
+    }
+
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         let tenant = self.ctx.get_tenant();
         let catalog = self.ctx.get_catalog(self.plan.catalog.as_str())?;
 
@@ -123,17 +125,12 @@ impl Interpreter for ShowCreateTableInterpreter {
                 .as_str()
         });
 
-        let show_fields = vec![
-            DataField::new("Table", Vu8::to_data_type()),
-            DataField::new("Create Table", Vu8::to_data_type()),
-        ];
-        let show_schema = DataSchemaRefExt::create(show_fields);
-
+        let show_schema = self.plan.schema();
         let block = DataBlock::create(show_schema.clone(), vec![
             Series::from_data(vec![name.as_bytes()]),
             Series::from_data(vec![table_create_sql.into_bytes()]),
         ]);
-        tracing::debug!("Show create table executor result: {:?}", block);
+        debug!("Show create table executor result: {:?}", block);
 
         Ok(Box::pin(DataBlockStream::create(show_schema, None, vec![
             block,

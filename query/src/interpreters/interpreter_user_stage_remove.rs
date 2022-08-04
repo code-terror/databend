@@ -19,12 +19,13 @@ use common_meta_types::StageType;
 use common_planners::RemoveUserStagePlan;
 use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
-use common_tracing::tracing;
+use tracing::debug;
 
 use crate::interpreters::interpreter_common::list_files;
 use crate::interpreters::Interpreter;
 use crate::sessions::QueryContext;
-use crate::storages::stage::StageSource;
+use crate::sessions::TableContext;
+use crate::storages::stage::StageSourceHelper;
 
 #[derive(Debug)]
 pub struct RemoveUserStageInterpreter {
@@ -44,18 +45,16 @@ impl Interpreter for RemoveUserStageInterpreter {
         "RemoveUserStageInterpreter"
     }
 
-    #[tracing::instrument(level = "info", skip(self, _input_stream), fields(ctx.id = self.ctx.get_id().as_str()))]
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    #[tracing::instrument(level = "info", skip(self), fields(ctx.id = self.ctx.get_id().as_str()))]
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         let plan = self.plan.clone();
         let user_mgr = self.ctx.get_user_manager();
         let tenant = self.ctx.get_tenant();
 
         let files = list_files(&self.ctx, &plan.stage, &plan.path, &plan.pattern).await?;
         let files = files.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
-        let op = StageSource::get_op(&self.ctx, &self.plan.stage).await?;
+        let rename_me: Arc<dyn TableContext> = self.ctx.clone();
+        let op = StageSourceHelper::get_op(&rename_me, &self.plan.stage).await?;
         if plan.stage.stage_type == StageType::Internal {
             user_mgr
                 .remove_files(&tenant, &plan.stage.stage_name, files.clone())
@@ -64,7 +63,7 @@ impl Interpreter for RemoveUserStageInterpreter {
 
         for name in files.into_iter() {
             let obj = format!("{}/{}", plan.stage.get_prefix(), name);
-            tracing::debug!("Removing object: {}", obj);
+            debug!("Removing object: {}", obj);
             let _ = op.object(&obj).delete().await;
         }
 

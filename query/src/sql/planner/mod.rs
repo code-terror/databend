@@ -21,6 +21,7 @@ use common_exception::Result;
 use parking_lot::RwLock;
 pub use plans::ScalarExpr;
 
+use crate::clusters::ClusterHelper;
 use crate::sessions::QueryContext;
 use crate::sql::optimizer::optimize;
 pub use crate::sql::planner::binder::BindContext;
@@ -34,12 +35,16 @@ mod semantic;
 pub use binder::Binder;
 pub use binder::ColumnBinding;
 pub use format::FormatTreeNode;
+pub use metadata::find_smallest_column;
 pub use metadata::ColumnEntry;
 pub use metadata::Metadata;
 pub use metadata::MetadataRef;
 pub use metadata::TableEntry;
 
 use self::plans::Plan;
+use super::optimizer::OptimizerConfig;
+use super::optimizer::OptimizerContext;
+use crate::sessions::TableContext;
 
 pub struct Planner {
     ctx: Arc<QueryContext>,
@@ -62,7 +67,10 @@ impl Planner {
         let plan = binder.bind(&stmt).await?;
 
         // Step 3: optimize the SExpr with optimizers, and generate optimized physical SExpr
-        let optimized_plan = optimize(self.ctx.clone(), plan)?;
+        let opt_ctx = Arc::new(OptimizerContext::new(OptimizerConfig {
+            enable_distributed_optimization: !self.ctx.get_cluster().is_empty(),
+        }));
+        let optimized_plan = optimize(self.ctx.clone(), opt_ctx, plan)?;
 
         Ok((optimized_plan, metadata.clone(), format))
     }

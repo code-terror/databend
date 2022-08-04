@@ -11,7 +11,6 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-//
 
 use std::sync::Arc;
 
@@ -19,6 +18,8 @@ use common_base::base::tokio;
 use common_datablocks::DataBlock;
 use common_datavalues::prelude::*;
 use common_exception::Result;
+use common_fuse_meta::meta::BlockMeta;
+use common_fuse_meta::meta::TableSnapshot;
 use common_meta_app::schema::TableMeta;
 use common_planners::add;
 use common_planners::col;
@@ -26,19 +27,16 @@ use common_planners::lit;
 use common_planners::sub;
 use common_planners::CreateTablePlan;
 use common_planners::Extras;
-use databend_query::catalogs::CATALOG_DEFAULT;
 use databend_query::interpreters::CreateTableInterpreter;
 use databend_query::interpreters::Interpreter;
 use databend_query::sessions::QueryContext;
+use databend_query::sessions::TableContext;
 use databend_query::sql::OPT_KEY_DATABASE_ID;
 use databend_query::sql::OPT_KEY_SNAPSHOT_LOCATION;
 use databend_query::storages::fuse::io::MetaReaders;
-use databend_query::storages::fuse::meta::BlockMeta;
-use databend_query::storages::fuse::meta::TableSnapshot;
 use databend_query::storages::fuse::pruning::BlockPruner;
 use databend_query::storages::fuse::FUSE_OPT_KEY_BLOCK_PER_SEGMENT;
 use databend_query::storages::fuse::FUSE_OPT_KEY_ROW_PER_BLOCK;
-use futures::TryStreamExt;
 
 use crate::storages::fuse::table_test_fixture::TestFixture;
 
@@ -48,8 +46,9 @@ async fn apply_block_pruning(
     push_down: &Option<Extras>,
     ctx: Arc<QueryContext>,
 ) -> Result<Vec<BlockMeta>> {
+    let ctx: Arc<dyn TableContext> = ctx;
     BlockPruner::new(table_snapshot)
-        .apply(ctx.as_ref(), schema, push_down)
+        .prune(&ctx, schema, push_down)
         .await
         .map(|v| v.into_iter().map(|(_, v)| v).collect())
 }
@@ -92,7 +91,7 @@ async fn test_block_pruner() -> Result<()> {
     };
 
     let interpreter = CreateTableInterpreter::try_create(ctx.clone(), create_table_plan)?;
-    interpreter.execute(None).await?;
+    let _ = interpreter.execute().await?;
 
     // get table
     let catalog = ctx.get_catalog("default")?;
@@ -113,21 +112,19 @@ async fn test_block_pruner() -> Result<()> {
     let blocks = (0..num_blocks)
         .into_iter()
         .map(|idx| {
-            Ok(DataBlock::create(test_schema.clone(), vec![
+            DataBlock::create(test_schema.clone(), vec![
                 // value of column a always equals  1
                 gen_col(1, row_per_block),
                 // for column b
                 // - for all block `B` in blocks, whose index is `i`
                 // - for all row in `B`, value of column b  equals `i`
                 gen_col(idx as u64, row_per_block),
-            ]))
+            ])
         })
         .collect::<Vec<_>>();
 
-    let stream = Box::pin(futures::stream::iter(blocks));
-    let r = table.append_data(ctx.clone(), stream).await?;
-    table
-        .commit_insertion(ctx.clone(), CATALOG_DEFAULT, r.try_collect().await?, false)
+    fixture
+        .append_commit_blocks(table.clone(), blocks, false, true)
         .await?;
 
     // get the latest tbl
@@ -235,7 +232,7 @@ async fn test_block_pruner_monotonic() -> Result<()> {
 
     let catalog = ctx.get_catalog("default")?;
     let interpreter = CreateTableInterpreter::try_create(ctx.clone(), create_table_plan)?;
-    interpreter.execute(None).await?;
+    interpreter.execute().await?;
 
     // get table
     let table = catalog
@@ -247,24 +244,22 @@ async fn test_block_pruner_monotonic() -> Result<()> {
         .await?;
 
     let blocks = vec![
-        Ok(DataBlock::create(test_schema.clone(), vec![
+        DataBlock::create(test_schema.clone(), vec![
             Series::from_data(vec![1u64, 2, 3]),
             Series::from_data(vec![11u64, 12, 13]),
-        ])),
-        Ok(DataBlock::create(test_schema.clone(), vec![
+        ]),
+        DataBlock::create(test_schema.clone(), vec![
             Series::from_data(vec![4u64, 5, 6]),
             Series::from_data(vec![21u64, 22, 23]),
-        ])),
-        Ok(DataBlock::create(test_schema, vec![
+        ]),
+        DataBlock::create(test_schema, vec![
             Series::from_data(vec![7u64, 8, 9]),
             Series::from_data(vec![31u64, 32, 33]),
-        ])),
+        ]),
     ];
 
-    let stream = Box::pin(futures::stream::iter(blocks));
-    let r = table.append_data(ctx.clone(), stream).await?;
-    table
-        .commit_insertion(ctx.clone(), CATALOG_DEFAULT, r.try_collect().await?, false)
+    fixture
+        .append_commit_blocks(table.clone(), blocks, false, true)
         .await?;
 
     // get the latest tbl

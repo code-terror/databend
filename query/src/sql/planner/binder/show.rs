@@ -13,12 +13,10 @@
 // limitations under the License.
 
 use common_ast::ast::ShowLimit;
-use common_ast::parser::parse_sql;
-use common_ast::parser::tokenize_sql;
-use common_ast::Backtrace;
 use common_exception::Result;
 
 use crate::sql::plans::Plan;
+use crate::sql::plans::RewriteKind;
 use crate::sql::BindContext;
 use crate::sql::Binder;
 
@@ -29,7 +27,8 @@ impl<'a> Binder {
         limit: &Option<ShowLimit<'a>>,
     ) -> Result<Plan> {
         // rewrite show functions to select * from system.functions ...
-        let query = format!("SELECT name, is_builtin, is_aggregate, definition, description FROM system.functions {} ORDER BY name",
+        let query = format!(
+            "SELECT name, is_builtin, is_aggregate, definition, description FROM system.functions {} ORDER BY name",
             match limit {
                 None => {
                     "".to_string()
@@ -46,10 +45,8 @@ impl<'a> Binder {
                 }
             }
         );
-        let tokens = tokenize_sql(query.as_str())?;
-        let backtrace = Backtrace::new();
-        let (stmt, _) = parse_sql(&tokens, &backtrace)?;
-        self.bind_statement(bind_context, &stmt).await
+        self.bind_rewrite_to_query(bind_context, &query, RewriteKind::ShowFunctions)
+            .await
     }
 
     pub(in crate::sql::planner::binder) async fn bind_show_settings(
@@ -61,11 +58,12 @@ impl<'a> Binder {
             .clone()
             .map(|s| format!("WHERE name LIKE '{s}'"))
             .unwrap_or_else(|| "".to_string());
-        let query = format!("SELECT name, value, default, level, description, type FROM system.settings {} ORDER BY name", sub_query);
+        let query = format!(
+            "SELECT name, value, default, level, description, type FROM system.settings {} ORDER BY name",
+            sub_query
+        );
 
-        let tokens = tokenize_sql(query.as_str())?;
-        let backtrace = Backtrace::new();
-        let (stmt, _) = parse_sql(&tokens, &backtrace)?;
-        self.bind_statement(bind_context, &stmt).await
+        self.bind_rewrite_to_query(bind_context, &query, RewriteKind::ShowSettings)
+            .await
     }
 }

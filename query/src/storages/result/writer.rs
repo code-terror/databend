@@ -17,15 +17,16 @@ use std::sync::Arc;
 use common_datablocks::serialize_data_blocks;
 use common_datablocks::DataBlock;
 use common_exception::Result;
+use common_fuse_meta::meta::SegmentInfo;
+use common_fuse_meta::meta::Statistics as FuseMetaStatistics;
 use common_planners::PartInfoPtr;
 use common_streams::SendableDataBlockStream;
 use futures::StreamExt;
 use opendal::Operator;
 
 use crate::sessions::QueryContext;
-use crate::storages::fuse::meta::SegmentInfo;
-use crate::storages::fuse::meta::Statistics as FuseMetaStatistics;
-use crate::storages::fuse::statistics::accumulator::BlockStatistics;
+use crate::sessions::TableContext;
+use crate::storages::fuse::statistics::BlockStatistics;
 use crate::storages::fuse::statistics::StatisticsAccumulator;
 use crate::storages::fuse::FuseTable;
 use crate::storages::result::result_locations::ResultLocations;
@@ -77,6 +78,7 @@ impl ResultTableWriter {
             uncompressed_byte_size: acc.in_memory_size,
             compressed_byte_size: acc.file_size,
             col_stats,
+            index_size: 0,
         });
 
         let meta = ResultTableMeta {
@@ -108,7 +110,7 @@ impl ResultTableWriter {
                 e
             })?;
         self.accumulator
-            .add_block(size, meta_data, block_statistics)?;
+            .add_block(size, meta_data, block_statistics, None, 0)?;
         Ok(self.get_last_part_info())
     }
 
