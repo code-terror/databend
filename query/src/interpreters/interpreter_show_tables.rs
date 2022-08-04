@@ -23,10 +23,10 @@ use common_streams::SendableDataBlockStream;
 
 use crate::catalogs::DatabaseCatalog;
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::interpreters::SelectInterpreter;
 use crate::optimizers::Optimizers;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 use crate::sql::PlanParser;
 
 pub struct ShowTablesInterpreter {
@@ -35,14 +35,14 @@ pub struct ShowTablesInterpreter {
 }
 
 impl ShowTablesInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, plan: ShowTablesPlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(ShowTablesInterpreter { ctx, plan }))
+    pub fn try_create(ctx: Arc<QueryContext>, plan: ShowTablesPlan) -> Result<Self> {
+        Ok(ShowTablesInterpreter { ctx, plan })
     }
 
     fn build_query(&self) -> Result<String> {
         let mut database = self.ctx.get_current_database();
         if let Some(v) = &self.plan.fromdb {
-            database = v.to_string();
+            database = v.to_owned();
         }
 
         if DatabaseCatalog::is_case_insensitive_db(&database) {
@@ -51,58 +51,57 @@ impl ShowTablesInterpreter {
 
         let showfull = self.plan.showfull;
 
-        let mut select_builder = SimpleSelectBuilder::from("information_schema.tables");
+        // Accessing table information of dropped table is rather heavy(at least, for now), so a
+        // dedicated system table `tables_with_history` is introduced. Although it contains the
+        // tables that are not droppped as well, but we should only access it if necessary.
+        let mut select_builder = if self.plan.with_history {
+            SimpleSelectBuilder::from("system.tables_with_history")
+        } else {
+            SimpleSelectBuilder::from("system.tables")
+        };
 
         if showfull {
             select_builder
-                .with_column(format!("table_name as Tables_in_{database}"))
-                .with_column("table_type as Table_type")
-                .with_column("table_catalog")
+                .with_column(format!("name AS Tables_in_{database}"))
+                .with_column("'BASE TABLE' AS Table_type")
+                .with_column("database AS table_catalog")
                 .with_column("engine")
-                .with_column("create_time");
+                .with_column("created_on AS create_time");
             if self.plan.with_history {
-                select_builder.with_column("drop_time");
-            } else {
-                select_builder
-                    .with_column("num_rows")
-                    .with_column("data_size")
-                    .with_column("data_compressed_size")
-                    .with_column("index_size");
+                select_builder.with_column("dropped_on AS drop_time");
             };
+            select_builder
+                .with_column("num_rows")
+                .with_column("data_size")
+                .with_column("data_compressed_size")
+                .with_column("index_size");
         } else {
-            select_builder.with_column(format!("table_name as Tables_in_{database}"));
+            select_builder.with_column(format!("name AS Tables_in_{database}"));
             if self.plan.with_history {
-                select_builder.with_column("drop_time");
+                select_builder.with_column("dropped_on AS drop_time");
             };
         }
 
         select_builder
-            .with_order_by("table_schema")
-            .with_order_by("table_name");
+            .with_order_by("database")
+            .with_order_by("name");
 
-        // filter out dropped tables if not showing history
-        if !self.plan.with_history {
-            select_builder.with_filter("drop_time = 'NULL'");
-        };
+        select_builder.with_filter(format!("database = '{database}'"));
+
+        let inner_sql = select_builder.build();
+
+        let mut outer_sql_builder = SimpleSelectBuilder::from(format!("({inner_sql})").as_str());
 
         match &self.plan.kind {
-            PlanShowKind::All => {
-                select_builder.with_filter(format!("table_schema = '{database}'"));
-                Ok(select_builder.build())
-            }
+            PlanShowKind::All => {}
             PlanShowKind::Like(v) => {
-                select_builder
-                    .with_filter(format!("table_schema = '{database}'"))
-                    .with_filter(format!("table_name LIKE {v}"));
-                Ok(select_builder.build())
+                outer_sql_builder.with_filter(format!("Tables_in_{database} LIKE {v}"));
             }
             PlanShowKind::Where(v) => {
-                select_builder
-                    .with_filter(format!("table_schema = '{database}'"))
-                    .with_filter(format!("({v})"));
-                Ok(select_builder.build())
+                outer_sql_builder.with_filter(format!("({v})"));
             }
-        }
+        };
+        Ok(outer_sql_builder.build())
     }
 }
 
@@ -112,17 +111,14 @@ impl Interpreter for ShowTablesInterpreter {
         "ShowTablesInterpreter"
     }
 
-    async fn execute(
-        &self,
-        input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         let query = self.build_query()?;
         let plan = PlanParser::parse(self.ctx.clone(), &query).await?;
         let optimized = Optimizers::create(self.ctx.clone()).optimize(&plan)?;
 
         if let PlanNode::Select(plan) = optimized {
             let interpreter = SelectInterpreter::try_create(self.ctx.clone(), plan)?;
-            interpreter.execute(input_stream).await
+            interpreter.execute().await
         } else {
             return Err(ErrorCode::LogicalError("Show tables build query error"));
         }
@@ -163,11 +159,7 @@ impl SimpleSelectBuilder {
     fn build(self) -> String {
         let columns = {
             let s = self.columns.join(",");
-            if !s.is_empty() {
-                s
-            } else {
-                "*".to_owned()
-            }
+            if !s.is_empty() { s } else { "*".to_owned() }
         };
 
         let order_bys = {

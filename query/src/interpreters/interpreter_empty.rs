@@ -21,7 +21,6 @@ use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
 
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::sessions::QueryContext;
 
 // EmptyInterpreter is a Empty interpreter to execute nothing.
@@ -29,8 +28,8 @@ use crate::sessions::QueryContext;
 pub struct EmptyInterpreter {}
 
 impl EmptyInterpreter {
-    pub fn try_create(_ctx: Arc<QueryContext>, _plan: EmptyPlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(EmptyInterpreter {}))
+    pub fn try_create(_ctx: Arc<QueryContext>, _plan: EmptyPlan) -> Result<Self> {
+        Ok(EmptyInterpreter {})
     }
 }
 
@@ -40,10 +39,7 @@ impl Interpreter for EmptyInterpreter {
         "EmptyInterpreter"
     }
 
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         Ok(Box::pin(DataBlockStream::create(
             Arc::new(DataSchema::empty()),
             None,

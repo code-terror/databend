@@ -14,33 +14,34 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use chrono_tz::Tz;
 use common_base::base::Progress;
 use common_base::base::Runtime;
-use common_base::infallible::Mutex;
-use common_base::infallible::RwLock;
 use common_contexts::DalContext;
 use common_exception::ErrorCode;
 use common_exception::Result;
-use common_io::prelude::FormatSettings;
 use common_meta_types::UserInfo;
 use common_planners::PlanNode;
+use common_users::RoleCacheMgr;
+use common_users::UserApiProvider;
 use futures::future::AbortHandle;
+use parking_lot::Mutex;
+use parking_lot::RwLock;
 use uuid::Uuid;
 
+use crate::auth::AuthMgr;
 use crate::catalogs::CatalogManager;
 use crate::clusters::Cluster;
 use crate::servers::http::v1::HttpQueryHandle;
+use crate::sessions::query_affect::QueryAffect;
 use crate::sessions::Session;
 use crate::sessions::Settings;
 use crate::sql::SQLCommon;
 use crate::storages::Table;
-use crate::users::auth::auth_mgr::AuthMgr;
-use crate::users::RoleCacheMgr;
-use crate::users::UserApiProvider;
 use crate::Config;
 
 type DatabaseAndTable = (String, String, String);
@@ -76,7 +77,9 @@ pub struct QueryContextShared {
     pub(in crate::sessions) dal_ctx: Arc<DalContext>,
     pub(in crate::sessions) user_manager: Arc<UserApiProvider>,
     pub(in crate::sessions) auth_manager: Arc<AuthMgr>,
-    pub(in crate::sessions) role_cache_manager: Arc<RoleCacheMgr>,
+    pub(in crate::sessions) affect: Arc<Mutex<Option<QueryAffect>>>,
+
+    pub(in crate::sessions) query_need_abort: Arc<AtomicBool>,
 }
 
 impl QueryContextShared {
@@ -107,7 +110,8 @@ impl QueryContextShared {
             dal_ctx: Arc::new(Default::default()),
             user_manager: user_manager.clone(),
             auth_manager: Arc::new(AuthMgr::create(conf, user_manager.clone()).await?),
-            role_cache_manager: Arc::new(RoleCacheMgr::new(user_manager)),
+            query_need_abort: Arc::new(AtomicBool::new(false)),
+            affect: Arc::new(Mutex::new(None)),
         }))
     }
 
@@ -116,22 +120,21 @@ impl QueryContextShared {
         *guard = Some(err);
     }
 
+    pub fn query_need_abort(self: &Arc<Self>) -> Arc<AtomicBool> {
+        self.query_need_abort.clone()
+    }
+
     pub fn kill(&self) {
         self.set_error(ErrorCode::AbortedQuery(
             "Aborted query, because the server is shutting down or the query was killed",
         ));
 
+        self.query_need_abort.store(true, Ordering::Release);
         let mut sources_abort_handle = self.sources_abort_handle.write();
 
         while let Some(source_abort_handle) = sources_abort_handle.pop() {
             source_abort_handle.abort();
         }
-
-        let http_query = self.http_query.read();
-        if let Some(handle) = &*http_query {
-            handle.abort();
-        }
-
         // TODO: Wait for the query to be processed (write out the last error)
     }
 
@@ -155,6 +158,10 @@ impl QueryContextShared {
         self.session.get_current_user()
     }
 
+    pub fn set_current_user(&self, user: UserInfo) {
+        self.session.set_current_user(user);
+    }
+
     pub fn set_current_tenant(&self, tenant: String) {
         self.session.set_current_tenant(tenant);
     }
@@ -172,11 +179,19 @@ impl QueryContextShared {
     }
 
     pub fn get_role_cache_manager(&self) -> Arc<RoleCacheMgr> {
-        self.role_cache_manager.clone()
+        self.session.get_role_cache_manager()
     }
 
     pub fn get_settings(&self) -> Arc<Settings> {
         self.session.get_settings()
+    }
+
+    pub fn get_changed_settings(&self) -> Arc<Settings> {
+        self.session.get_changed_settings()
+    }
+
+    pub fn apply_changed_settings(&self, changed_settings: Arc<Settings>) -> Result<()> {
+        self.session.apply_changed_settings(changed_settings)
     }
 
     pub fn get_catalogs(&self) -> Arc<CatalogManager> {
@@ -247,6 +262,9 @@ impl QueryContextShared {
         let mut http_query = self.http_query.write();
         *http_query = Some(handle);
     }
+    pub fn get_http_query(&self) -> Option<HttpQueryHandle> {
+        self.http_query.read().clone()
+    }
 
     pub fn attach_query_str(&self, query: &str) {
         let mut running_query = self.running_query.write();
@@ -272,30 +290,18 @@ impl QueryContextShared {
         self.session.get_config()
     }
 
-    pub fn get_format_settings(&self) -> Result<FormatSettings> {
-        let settings = self.get_settings();
-        let mut format = FormatSettings::default();
-        {
-            format.record_delimiter = settings.get_record_delimiter()?;
-            format.field_delimiter = settings.get_field_delimiter()?;
-            format.empty_as_default = settings.get_empty_as_default()? > 0;
-            format.skip_header = settings.get_skip_header()? > 0;
-            let tz = String::from_utf8(settings.get_timezone()?).map_err(|_| {
-                ErrorCode::LogicalError("Timezone has been checked and should be valid.")
-            })?;
-            format.timezone = tz.parse::<Tz>().map_err(|_| {
-                ErrorCode::InvalidTimezone("Timezone has been checked and should be valid")
-            })?;
-        }
-        Ok(format)
-    }
-
     pub fn get_connection_id(&self) -> String {
         self.session.get_id()
     }
 
-    pub async fn reload_config(&self) -> Result<()> {
-        self.session.session_mgr.reload_config().await
+    pub fn get_affect(&self) -> Option<QueryAffect> {
+        let guard = self.affect.lock();
+        (*guard).clone()
+    }
+
+    pub fn set_affect(&self, affect: QueryAffect) {
+        let mut guard = self.affect.lock();
+        *guard = Some(affect);
     }
 }
 

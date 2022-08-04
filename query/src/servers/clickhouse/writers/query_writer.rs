@@ -14,13 +14,15 @@
 
 use std::borrow::Cow;
 
+use chrono::Date;
+use chrono::DateTime;
+use chrono::Datelike;
 use common_base::base::ProgressValues;
 use common_datablocks::DataBlock;
 use common_datavalues::prelude::*;
 use common_exception::ErrorCode;
 use common_exception::Result;
 use common_io::prelude::FormatSettings;
-use common_tracing::tracing;
 use futures::channel::mpsc::Receiver;
 use futures::StreamExt;
 use opensrv_clickhouse::connection::Connection;
@@ -29,8 +31,8 @@ use opensrv_clickhouse::errors::Result as CHResult;
 use opensrv_clickhouse::errors::ServerError;
 use opensrv_clickhouse::types::column::{self};
 use opensrv_clickhouse::types::Block;
-use opensrv_clickhouse::types::DateTimeType;
 use opensrv_clickhouse::types::SqlType;
+use tracing::error;
 
 use crate::servers::clickhouse::interactive_worker_base::BlockItem;
 
@@ -79,7 +81,7 @@ impl<'a> QueryWriter<'a> {
     }
 
     async fn write_error(&mut self, error: ErrorCode) -> Result<()> {
-        tracing::error!("OnQuery Error: {:?}", error);
+        error!("OnQuery Error: {:?}", error);
         let clickhouse_err = to_clickhouse_err(error);
         match self.conn.write_error(&clickhouse_err).await {
             Ok(_) => Ok(()),
@@ -138,7 +140,7 @@ pub fn to_clickhouse_err(res: ErrorCode) -> opensrv_clickhouse::errors::Error {
 }
 
 pub fn from_clickhouse_err(res: opensrv_clickhouse::errors::Error) -> ErrorCode {
-    ErrorCode::LogicalError(format!("clickhouse-srv expception: {:?}", res))
+    ErrorCode::LogicalError(format!("clickhouse-srv exception: {:?}", res))
 }
 
 pub fn to_clickhouse_block(block: DataBlock, format: &FormatSettings) -> Result<Block> {
@@ -149,12 +151,13 @@ pub fn to_clickhouse_block(block: DataBlock, format: &FormatSettings) -> Result<
 
     for column_index in 0..block.num_columns() {
         let column = block.column(column_index);
+        let column = &column.convert_full_column();
         let field = block.schema().field(column_index);
         let name = field.name();
-        let serializer = field.data_type().create_serializer();
+        let serializer = field.data_type().create_serializer(column)?;
         result.append_column(column::new_column(
             name,
-            serializer.serialize_clickhouse_format(&column.convert_full_column(), format)?,
+            serializer.serialize_clickhouse_column(format)?,
         ));
     }
     Ok(result)
@@ -163,14 +166,20 @@ pub fn to_clickhouse_block(block: DataBlock, format: &FormatSettings) -> Result<
 pub fn from_clickhouse_block(schema: DataSchemaRef, block: Block) -> Result<DataBlock> {
     let get_series = |block: &Block, index: usize| -> CHResult<ColumnRef> {
         let col = &block.columns()[index];
+
         match col.sql_type() {
             SqlType::UInt8 => Ok(UInt8Column::from_iterator(col.iter::<u8>()?.copied()).arc()),
-            SqlType::UInt16 | SqlType::Date => {
-                Ok(UInt16Column::from_iterator(col.iter::<u16>()?.copied()).arc())
-            }
-            SqlType::UInt32 | SqlType::DateTime(DateTimeType::DateTime32) => {
-                Ok(UInt32Column::from_iterator(col.iter::<u32>()?.copied()).arc())
-            }
+            SqlType::UInt16 => Ok(UInt16Column::from_iterator(col.iter::<u16>()?.copied()).arc()),
+            SqlType::Date => Ok(Int32Column::from_iterator(
+                col.iter::<Date<_>>()?
+                    .map(|v| v.naive_utc().num_days_from_ce()),
+            )
+            .arc()),
+            SqlType::UInt32 => Ok(UInt32Column::from_iterator(col.iter::<u32>()?.copied()).arc()),
+            SqlType::DateTime(_) => Ok(Int64Column::from_iterator(
+                col.iter::<DateTime<_>>()?.map(|v| v.timestamp_micros()),
+            )
+            .arc()),
             SqlType::UInt64 => Ok(UInt64Column::from_iterator(col.iter::<u64>()?.copied()).arc()),
             SqlType::Int8 => Ok(Int8Column::from_iterator(col.iter::<i8>()?.copied()).arc()),
             SqlType::Int16 => Ok(Int16Column::from_iterator(col.iter::<i16>()?.copied()).arc()),
@@ -184,13 +193,21 @@ pub fn from_clickhouse_block(schema: DataSchemaRef, block: Block) -> Result<Data
             SqlType::Nullable(SqlType::UInt8) => Ok(Series::from_data(
                 col.iter::<Option<u8>>()?.map(|c| c.copied()),
             )),
-            SqlType::Nullable(SqlType::UInt16) | SqlType::Nullable(SqlType::Date) => Ok(
-                Series::from_data(col.iter::<Option<u16>>()?.map(|c| c.copied())),
-            ),
-            SqlType::Nullable(SqlType::UInt32)
-            | SqlType::Nullable(SqlType::DateTime(DateTimeType::DateTime32)) => Ok(
-                Series::from_data(col.iter::<Option<u32>>()?.map(|c| c.copied())),
-            ),
+            SqlType::Nullable(SqlType::UInt16) => Ok(Series::from_data(
+                col.iter::<Option<u16>>()?.map(|c| c.copied()),
+            )),
+            SqlType::Nullable(SqlType::Date) => {
+                Ok(Series::from_data(col.iter::<Option<Date<_>>>()?.map(|c| {
+                    c.map(|v| v.naive_utc().num_days_from_ce() as u16)
+                })))
+            }
+            SqlType::Nullable(SqlType::UInt32) => Ok(Series::from_data(
+                col.iter::<Option<u32>>()?.map(|c| c.copied()),
+            )),
+            SqlType::Nullable(SqlType::DateTime(_)) => Ok(Series::from_data(
+                col.iter::<Option<DateTime<_>>>()?
+                    .map(|c| c.map(|v| v.timestamp_micros())),
+            )),
             SqlType::Nullable(SqlType::UInt64) => Ok(Series::from_data(
                 col.iter::<Option<u64>>()?.map(|c| c.copied()),
             )),

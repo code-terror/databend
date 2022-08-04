@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use common_base::base::tokio::task;
 use common_base::base::tokio::time::sleep;
-use common_base::infallible::RwLock;
+use parking_lot::RwLock;
 
 use crate::servers::http::v1::query::expirable::Expirable;
 use crate::servers::http::v1::query::expirable::ExpiringState;
@@ -61,7 +61,7 @@ where V: Expirable
 async fn run_check<T: Expirable>(e: &T, max_idle: Duration) -> bool {
     loop {
         match e.expire_state() {
-            ExpiringState::InUse => sleep(max_idle).await,
+            ExpiringState::InUse(_) => sleep(max_idle).await,
             ExpiringState::Idle { idle_time } => {
                 if idle_time > max_idle {
                     return true;

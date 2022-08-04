@@ -15,14 +15,14 @@
 use std::collections::HashSet;
 use std::fmt::Debug;
 
-use common_io::prelude::StorageParams;
-use common_io::prelude::StorageS3Config;
 use common_meta_types as mt;
 use common_meta_types::UserInfo;
 use common_meta_types::UserPrivilegeType;
 use common_proto_conv::FromToProto;
 use common_proto_conv::Incompatible;
 use common_protos::pb;
+use common_storage::StorageParams;
+use common_storage::StorageS3Config;
 use enumflags2::make_bitflags;
 
 fn s(ss: impl ToString) -> String {
@@ -85,6 +85,7 @@ fn test_user_stage_info() -> mt::UserStageInfo {
             size_limit: 1038,
         },
         comment: "test".to_string(),
+        ..Default::default()
     }
 }
 
@@ -113,12 +114,13 @@ fn test_user_incompatible() -> anyhow::Result<()> {
     {
         let user_info = test_user_info();
         let mut p = user_info.to_pb()?;
-        p.ver = 2;
+        p.ver = 3;
+        p.min_compatible = 3;
 
         let res = mt::UserInfo::from_pb(p);
         assert_eq!(
             Incompatible {
-                reason: s("ver=2 is not compatible with [1, 1]")
+                reason: s("executable ver=2 is smaller than the message min compatible ver: 3")
             },
             res.unwrap_err()
         );
@@ -127,12 +129,13 @@ fn test_user_incompatible() -> anyhow::Result<()> {
     {
         let user_stage_info = test_user_stage_info();
         let mut p = user_stage_info.to_pb()?;
-        p.ver = 2;
+        p.ver = 3;
+        p.min_compatible = 3;
 
         let res = mt::UserStageInfo::from_pb(p);
         assert_eq!(
             Incompatible {
-                reason: s("ver=2 is not compatible with [1, 1]")
+                reason: s("executable ver=2 is smaller than the message min compatible ver: 3")
             },
             res.unwrap_err()
         );

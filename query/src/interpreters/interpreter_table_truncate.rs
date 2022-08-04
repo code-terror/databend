@@ -22,7 +22,6 @@ use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
 
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::sessions::QueryContext;
 
 pub struct TruncateTableInterpreter {
@@ -31,8 +30,8 @@ pub struct TruncateTableInterpreter {
 }
 
 impl TruncateTableInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, plan: TruncateTablePlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(TruncateTableInterpreter { ctx, plan }))
+    pub fn try_create(ctx: Arc<QueryContext>, plan: TruncateTablePlan) -> Result<Self> {
+        Ok(TruncateTableInterpreter { ctx, plan })
     }
 }
 
@@ -42,12 +41,9 @@ impl Interpreter for TruncateTableInterpreter {
         "TruncateTableInterpreter"
     }
 
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         let catalog_name = self.plan.catalog.as_str();
-        let db_name = self.plan.db.as_str();
+        let db_name = self.plan.database.as_str();
         let tbl_name = self.plan.table.as_str();
 
         self.ctx

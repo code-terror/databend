@@ -12,45 +12,56 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::str::FromStr;
 
-use common_exception::ErrorCode;
-use common_exception::Result;
-use common_io::prelude::StorageParams;
+use common_datavalues::chrono::DateTime;
+use common_datavalues::chrono::Utc;
+use common_storage::StorageParams;
 
-/*
--- Internal stage
-CREATE [ OR REPLACE ] [ TEMPORARY ] STAGE [ IF NOT EXISTS ] <internal_stage_name>
-    internalStageParams
-    directoryTableParams
-  [ FILE_FORMAT = ( { FORMAT_NAME = '<file_format_name>' | TYPE = { CSV | JSON | AVRO | ORC | PARQUET | XML } [ formatTypeOptions ] ) } ]
-  [ COPY_OPTIONS = ( copyOptions ) ]
-  [ COMMENT = '<string_literal>' ]
+use crate::UserIdentity;
 
--- External stage
-CREATE [ OR REPLACE ] [ TEMPORARY ] STAGE [ IF NOT EXISTS ] <external_stage_name>
-    externalStageParams
-    directoryTableParams
-  [ FILE_FORMAT = ( { FORMAT_NAME = '<file_format_name>' | TYPE = { CSV | JSON | AVRO | ORC | PARQUET | XML } [ formatTypeOptions ] ) } ]
-  [ COPY_OPTIONS = ( copyOptions ) ]
-  [ COMMENT = '<string_literal>' ]
-
-
-WHERE
-
-externalStageParams (for Amazon S3) ::=
-  URL = 's3://<bucket>[/<path>/]'
-  [ { CREDENTIALS = ( {  { AWS_KEY_ID = '<string>' AWS_SECRET_KEY = '<string>' [ AWS_TOKEN = '<string>' ] } | AWS_ROLE = '<string>'  } ) ) } ]
-
-copyOptions ::=
-     ON_ERROR = { CONTINUE | SKIP_FILE | SKIP_FILE_<num> | SKIP_FILE_<num>% | ABORT_STATEMENT }
-     SIZE_LIMIT = <num>
- */
+// -- Internal stage
+// CREATE [ OR REPLACE ] [ TEMPORARY ] STAGE [ IF NOT EXISTS ] <internal_stage_name>
+// internalStageParams
+// directoryTableParams
+// [ FILE_FORMAT = ( { FORMAT_NAME = '<file_format_name>' | TYPE = { CSV | JSON | AVRO | ORC | PARQUET | XML } [ formatTypeOptions ] ) } ]
+// [ COPY_OPTIONS = ( copyOptions ) ]
+// [ COMMENT = '<string_literal>' ]
+//
+// -- External stage
+// CREATE [ OR REPLACE ] [ TEMPORARY ] STAGE [ IF NOT EXISTS ] <external_stage_name>
+// externalStageParams
+// directoryTableParams
+// [ FILE_FORMAT = ( { FORMAT_NAME = '<file_format_name>' | TYPE = { CSV | JSON | AVRO | ORC | PARQUET | XML } [ formatTypeOptions ] ) } ]
+// [ COPY_OPTIONS = ( copyOptions ) ]
+// [ COMMENT = '<string_literal>' ]
+//
+//
+// WHERE
+//
+// externalStageParams (for Amazon S3) ::=
+// URL = 's3://<bucket>[/<path>/]'
+// [ { CREDENTIALS = ( {  { AWS_KEY_ID = '<string>' AWS_SECRET_KEY = '<string>' [ AWS_TOKEN = '<string>' ] } | AWS_ROLE = '<string>'  } ) ) } ]
+//
+// copyOptions ::=
+// ON_ERROR = { CONTINUE | SKIP_FILE | SKIP_FILE_<num> | SKIP_FILE_<num>% | ABORT_STATEMENT }
+// SIZE_LIMIT = <num>
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub enum StageType {
     Internal,
     External,
+}
+
+impl fmt::Display for StageType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            StageType::Internal => "Internal",
+            StageType::External => "External",
+        };
+        write!(f, "{}", name)
+    }
 }
 
 impl Default for StageType {
@@ -59,7 +70,7 @@ impl Default for StageType {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StageFileCompression {
     Auto,
     Gzip,
@@ -70,6 +81,7 @@ pub enum StageFileCompression {
     RawDeflate,
     Lzo,
     Snappy,
+    Xz,
     None,
 }
 
@@ -79,10 +91,33 @@ impl Default for StageFileCompression {
     }
 }
 
+impl FromStr for StageFileCompression {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        match s.to_lowercase().as_str() {
+            "auto" => Ok(StageFileCompression::Auto),
+            "gzip" => Ok(StageFileCompression::Gzip),
+            "bz2" => Ok(StageFileCompression::Bz2),
+            "brotli" => Ok(StageFileCompression::Brotli),
+            "zstd" => Ok(StageFileCompression::Zstd),
+            "deflate" => Ok(StageFileCompression::Deflate),
+            "rawdeflate" | "raw_deflate" => Ok(StageFileCompression::RawDeflate),
+            "lzo" => Ok(StageFileCompression::Lzo),
+            "snappy" => Ok(StageFileCompression::Snappy),
+            "xz" => Ok(StageFileCompression::Xz),
+            "none" => Ok(StageFileCompression::None),
+            _ => Err("Unknown file compression type, must one of { auto | gzip | bz2 | brotli | zstd | deflate | raw_deflate | lzo | snappy | xz | none }"
+                         .to_string()),
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub enum StageFileFormatType {
     Csv,
+    Tsv,
     Json,
+    NdJson,
     Avro,
     Orc,
     Parquet,
@@ -100,7 +135,9 @@ impl FromStr for StageFileFormatType {
     fn from_str(s: &str) -> std::result::Result<Self, String> {
         match s.to_uppercase().as_str() {
             "CSV" => Ok(StageFileFormatType::Csv),
+            "TSV" => Ok(StageFileFormatType::Tsv),
             "JSON" => Ok(StageFileFormatType::Json),
+            "NDJSON" => Ok(StageFileFormatType::NdJson),
             "AVRO" => Ok(StageFileFormatType::Avro),
             "ORC" => Ok(StageFileFormatType::Orc),
             "PARQUET" => Ok(StageFileFormatType::Parquet),
@@ -167,13 +204,12 @@ impl FromStr for OnErrorMode {
             v => {
                 let num_str = v.replace("SKIP_FILE_", "");
                 let nums = num_str.parse::<u64>();
-                match nums{
-                    Ok(v) => { Ok(OnErrorMode::SkipFileNum(v)) }
-                    Err(_) => {
-                        Err(
-                            format!("Unknown OnError mode:{:?}, must one of {{ CONTINUE | SKIP_FILE | SKIP_FILE_<num> | ABORT_STATEMENT }}", v)
-                        )
-                    }
+                match nums {
+                    Ok(v) => Ok(OnErrorMode::SkipFileNum(v)),
+                    Err(_) => Err(format!(
+                        "Unknown OnError mode:{:?}, must one of {{ CONTINUE | SKIP_FILE | SKIP_FILE_<num> | ABORT_STATEMENT }}",
+                        v
+                    )),
                 }
             }
         }
@@ -196,18 +232,36 @@ pub struct UserStageInfo {
     pub file_format_options: FileFormatOptions,
     pub copy_options: CopyOptions,
     pub comment: String,
+    pub number_of_files: u64,
+    pub creator: Option<UserIdentity>,
 }
 
-impl TryFrom<Vec<u8>> for UserStageInfo {
-    type Error = ErrorCode;
-
-    fn try_from(value: Vec<u8>) -> Result<Self> {
-        match serde_json::from_slice(&value) {
-            Ok(info) => Ok(info),
-            Err(serialize_error) => Err(ErrorCode::IllegalUserStageFormat(format!(
-                "Cannot deserialize stage from bytes. cause {}",
-                serialize_error
-            ))),
+impl UserStageInfo {
+    pub fn new_external_stage(storage: StorageParams, path: &str) -> UserStageInfo {
+        UserStageInfo {
+            stage_name: format!("{storage},path={path}"),
+            stage_type: StageType::External,
+            stage_params: StageParams { storage },
+            ..Default::default()
         }
     }
+
+    pub fn get_prefix(&self) -> String {
+        match self.stage_type {
+            StageType::External => "/".to_string(),
+            StageType::Internal => {
+                // It's internal, so we should prefix with stage name.
+                format!("/stage/{}/", self.stage_name)
+            }
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct StageFile {
+    pub path: String,
+    pub size: u64,
+    pub md5: Option<String>,
+    pub last_modified: DateTime<Utc>,
+    pub creator: Option<UserIdentity>,
 }

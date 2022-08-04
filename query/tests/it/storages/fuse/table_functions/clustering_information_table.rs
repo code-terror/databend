@@ -11,7 +11,6 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-//
 
 use common_base::base::tokio;
 use common_datablocks::DataBlock;
@@ -20,6 +19,7 @@ use common_exception::ErrorCode;
 use common_exception::Result;
 use common_planners::*;
 use databend_query::interpreters::CreateTableInterpreter;
+use databend_query::interpreters::Interpreter;
 use tokio_stream::StreamExt;
 
 use crate::storages::fuse::table_test_fixture::TestFixture;
@@ -35,7 +35,7 @@ async fn test_clustering_information_table_read() -> Result<()> {
     // test db & table
     let create_table_plan = fixture.default_crate_table_plan();
     let interpreter = CreateTableInterpreter::try_create(ctx.clone(), create_table_plan)?;
-    interpreter.execute(None).await?;
+    interpreter.execute().await?;
 
     // func args
     let arg_db = Expression::create_literal(DataValue::String(db.as_bytes().to_vec()));
@@ -63,7 +63,7 @@ async fn test_clustering_information_table_read() -> Result<()> {
     }
 
     {
-        let qry = format!("insert into {}.{} values(1),(2)", db, tbl);
+        let qry = format!("insert into {}.{} values(1, (2, 3)),(2, (4, 6))", db, tbl);
         execute_query(ctx.clone(), qry.as_str()).await?;
         let expected = vec![
             "+-----------------+-------------------+----------------------------+------------------+---------------+-----------------------+",

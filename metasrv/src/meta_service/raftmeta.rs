@@ -15,6 +15,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::net::Ipv4Addr;
+use std::sync::atomic::AtomicI32;
 use std::sync::Arc;
 
 use common_base::base::tokio;
@@ -28,7 +29,6 @@ use common_meta_raft_store::state_machine::StateMachine;
 use common_meta_sled_store::openraft;
 use common_meta_types::protobuf::raft_service_client::RaftServiceClient;
 use common_meta_types::protobuf::raft_service_server::RaftServiceServer;
-use common_meta_types::protobuf::RaftReply;
 use common_meta_types::protobuf::WatchRequest;
 use common_meta_types::AppliedState;
 use common_meta_types::Cmd;
@@ -37,6 +37,7 @@ use common_meta_types::Endpoint;
 use common_meta_types::ForwardRequest;
 use common_meta_types::ForwardResponse;
 use common_meta_types::ForwardToLeader;
+use common_meta_types::LeaveRequest;
 use common_meta_types::LogEntry;
 use common_meta_types::MetaError;
 use common_meta_types::MetaNetworkError;
@@ -46,28 +47,59 @@ use common_meta_types::MetaResult;
 use common_meta_types::Node;
 use common_meta_types::NodeId;
 use common_meta_types::ToMetaError;
-use common_tracing::tracing;
-use common_tracing::tracing::Instrument;
 use openraft::Config;
+use openraft::LogId;
 use openraft::Raft;
 use openraft::RaftMetrics;
 use openraft::SnapshotPolicy;
-use tonic::Status;
+use openraft::State;
+use tracing::debug;
+use tracing::error;
+use tracing::info;
+use tracing::warn;
+use tracing::Instrument;
 
+use crate::configs::Config as MetaConfig;
 use crate::meta_service::meta_leader::MetaLeader;
 use crate::meta_service::ForwardRequestBody;
 use crate::meta_service::JoinRequest;
 use crate::meta_service::RaftServiceImpl;
 use crate::metrics::incr_meta_metrics_leader_change;
 use crate::metrics::incr_meta_metrics_read_failed;
-use crate::metrics::set_meta_metrics_has_leader;
+use crate::metrics::set_meta_metrics_current_leader;
 use crate::metrics::set_meta_metrics_is_leader;
+use crate::metrics::set_meta_metrics_node_is_health;
 use crate::metrics::set_meta_metrics_proposals_applied;
 use crate::network::Network;
 use crate::store::MetaRaftStore;
 use crate::watcher::WatcherManager;
 use crate::watcher::WatcherStreamSender;
 use crate::Opened;
+
+#[derive(serde::Serialize)]
+pub struct MetaNodeStatus {
+    pub id: NodeId,
+
+    pub endpoint: String,
+
+    pub db_size: u64,
+
+    pub state: String,
+
+    pub is_leader: bool,
+
+    pub current_term: u64,
+
+    pub last_log_index: u64,
+
+    pub last_applied: LogId,
+
+    pub leader: Option<Node>,
+
+    pub voters: Vec<Node>,
+
+    pub non_voters: Vec<Node>,
+}
 
 // MetaRaft is a impl of the generic Raft handling meta data R/W.
 pub type MetaRaft = Raft<LogEntry, AppliedState, Network, MetaRaftStore>;
@@ -80,6 +112,7 @@ pub struct MetaNode {
     pub running_tx: watch::Sender<()>,
     pub running_rx: watch::Receiver<()>,
     pub join_handles: Mutex<Vec<JoinHandle<MetaResult<()>>>>,
+    pub joined_tasks: AtomicI32,
 }
 
 impl Opened for MetaNode {
@@ -132,10 +165,11 @@ impl MetaNodeBuilder {
             running_tx: tx,
             running_rx: rx,
             join_handles: Mutex::new(Vec::new()),
+            joined_tasks: AtomicI32::new(1),
         });
 
         if self.monitor_metrics {
-            tracing::info!("about to subscribe raft metrics");
+            info!("about to subscribe raft metrics");
             MetaNode::subscribe_metrics(mn.clone(), metrics_rx).await;
         }
 
@@ -145,7 +179,7 @@ impl MetaNodeBuilder {
             sto.get_node_endpoint(&node_id).await?
         };
 
-        tracing::info!("about to start raft grpc on endpoint {}", endpoint);
+        info!("about to start raft grpc on endpoint {}", endpoint);
 
         MetaNode::start_grpc(mn.clone(), &endpoint.addr, endpoint.port).await?;
 
@@ -191,12 +225,10 @@ impl MetaNode {
     }
 
     pub fn new_raft_config(config: &RaftConfig) -> Config {
-        // TODO(xp): configure cluster name.
-
         let hb = config.heartbeat_interval;
 
         Config {
-            cluster_name: "foo_cluster".to_string(),
+            cluster_name: config.cluster_name.clone(),
             heartbeat_interval: hb,
             election_timeout_min: hb * 8,
             election_timeout_max: hb * 12,
@@ -237,7 +269,7 @@ impl MetaNode {
             }
         };
 
-        tracing::info!("about to start raft grpc on resolved addr {}", addr);
+        info!("about to start raft grpc on resolved addr {}", addr);
 
         let addr_str = addr.to_string();
         let ret = addr.parse::<std::net::SocketAddr>();
@@ -254,10 +286,9 @@ impl MetaNode {
         let h = tokio::spawn(async move {
             srv.serve_with_shutdown(addr, async move {
                 let _ = rx.changed().await;
-                tracing::info!(
+                info!(
                     "signal received, shutting down: id={} {} ",
-                    node_id,
-                    addr_str
+                    node_id, addr_str
                 );
             })
             .await
@@ -275,15 +306,13 @@ impl MetaNode {
     /// Optionally boot a single node cluster.
     /// 1. If `open` is `Some`, try to open an existent one.
     /// 2. If `create` is `Some`, try to create an one in non-voter mode.
-    /// 3. If `init_cluster` is `Some` and it is just created, try to initialize a single-node cluster.
-    ///
-    /// TODO(xp): `init_cluster`: pass in a Map<id, address> to initialize the cluster.
     #[tracing::instrument(level = "debug", skip(config), fields(config_id=config.config_id.as_str()))]
     pub async fn open_create_boot(
         config: &RaftConfig,
         open: Option<()>,
         create: Option<()>,
-        init_cluster: Option<Vec<String>>,
+        is_initialize: bool,
+        node: Node,
     ) -> MetaResult<Arc<MetaNode>> {
         let mut config = config.clone();
 
@@ -292,7 +321,7 @@ impl MetaNode {
         //
         // On mac File::sync_all() takes 10 ms ~ 30 ms, 500 ms at worst, which very likely to fail a test.
         if cfg!(target_os = "macos") {
-            tracing::warn!("Disabled fsync for meta data tests. fsync on mac is quite slow");
+            warn!("Disabled fsync for meta data tests. fsync on mac is quite slow");
             config.no_sync = true;
         }
 
@@ -310,22 +339,17 @@ impl MetaNode {
             .endpoint(config.raft_api_listen_host_endpoint());
         let mn = builder.build().await?;
 
-        tracing::info!("MetaNode started: {:?}", config);
+        info!("MetaNode started: {:?}", config);
 
         // init_cluster with advertise_host other than listen_host
-        if !is_open {
-            if let Some(_addrs) = init_cluster {
-                mn.init_cluster(config.raft_api_advertise_host_endpoint())
-                    .await?;
-            }
+        if !is_open && is_initialize {
+            mn.init_cluster(node).await?;
         }
         Ok(mn)
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
     pub async fn stop(&self) -> MetaResult<i32> {
-        // TODO(xp): need to be reentrant.
-
         let mut rx = self.raft.metrics();
 
         self.raft
@@ -341,33 +365,32 @@ impl MetaNode {
             if r.is_err() {
                 break;
             }
-            tracing::info!("waiting for raft to shutdown, metrics: {:?}", rx.borrow());
+            info!("waiting for raft to shutdown, metrics: {:?}", rx.borrow());
         }
-        tracing::info!("shutdown raft");
+        info!("shutdown raft");
 
-        // raft counts 1
-        let mut joined = 1;
         for j in self.join_handles.lock().await.iter_mut() {
             let _rst = j
                 .await
                 .map_error_to_meta_error(MetaError::MetaServiceError, || "fail to join")?;
-            joined += 1;
+            // TODO(luhuanbing): Add joined node information to enrich debugging information
+            self.joined_tasks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
-        tracing::info!("shutdown: id={}", self.sto.id);
+        info!("shutdown: id={}", self.sto.id);
+        let joined = self.joined_tasks.load(std::sync::atomic::Ordering::Relaxed);
         Ok(joined)
     }
 
     // spawn a monitor to watch raft state changes such as leader changes,
     // and manually add non-voter to cluster so that non-voter receives raft logs.
     pub async fn subscribe_metrics(mn: Arc<Self>, mut metrics_rx: watch::Receiver<RaftMetrics>) {
-        //TODO: return a handle for join
-        // TODO: every state change triggers add_non_voter!!!
+        // TODO(luhuanbing): every state change triggers add_non_voter is not very reasonable
         let mut running_rx = mn.running_rx.clone();
         let mut jh = mn.join_handles.lock().await;
         let mut current_leader: Option<u64> = None;
 
-        // TODO: reduce dependency: it does not need all of the fields in MetaNode
         let mn = mn.clone();
 
         let span = tracing::span!(tracing::Level::INFO, "watch-metrics");
@@ -386,6 +409,10 @@ impl MetaNode {
                         };
                         if changed.is_ok() {
                             let mm = metrics_rx.borrow().clone();
+                            set_meta_metrics_node_is_health(
+                                mm.state == State::Follower || mm.state == State::Leader,
+                            );
+
                             if let Some(cur) = mm.current_leader {
                                 // if current leader has changed?
                                 if let Some(leader) = current_leader {
@@ -399,23 +426,21 @@ impl MetaNode {
                                 }
 
                                 if cur == mn.sto.id {
-                                    // TODO: check result
                                     let _rst = mn.add_configured_non_voters().await;
 
                                     if _rst.is_err() {
-                                        tracing::info!(
+                                        warn!(
                                             "fail to add non-voter: my id={}, rst:{:?}",
-                                            mn.sto.id,
-                                            _rst
+                                            mn.sto.id, _rst
                                         );
                                     }
                                     set_meta_metrics_is_leader(true);
                                 } else {
                                     set_meta_metrics_is_leader(false);
                                 }
-                                set_meta_metrics_has_leader(true);
+                                set_meta_metrics_current_leader(cur);
                             } else {
-                                set_meta_metrics_has_leader(false);
+                                set_meta_metrics_current_leader(0);
                                 set_meta_metrics_is_leader(false);
                             }
                             if let Some(last_applied) = mm.last_applied {
@@ -438,88 +463,154 @@ impl MetaNode {
     /// Start MetaNode in either `boot`, `single`, `join` or `open` mode,
     /// according to config.
     #[tracing::instrument(level = "debug", skip(config))]
-    pub async fn start(config: &RaftConfig) -> Result<Arc<MetaNode>, MetaError> {
-        tracing::info!(?config, "start()");
+    pub async fn start(config: &MetaConfig) -> Result<Arc<MetaNode>, MetaError> {
+        info!(?config, "start()");
         let mn = Self::do_start(config).await?;
-        tracing::info!("Done starting MetaNode: {:?}", config);
+        info!("Done starting MetaNode: {:?}", config);
         Ok(mn)
     }
 
+    /// Leave the cluster if `--leave` is specified.
+    ///
+    /// Return whether it has left the cluster.
+    #[tracing::instrument(level = "info", skip_all)]
+    pub async fn leave_cluster(conf: &RaftConfig) -> Result<bool, MetaError> {
+        if conf.leave_via.is_empty() {
+            info!("'--leave-via' is empty, do not need to leave cluster");
+            return Ok(false);
+        }
+
+        let leave_id = if let Some(id) = conf.leave_id {
+            id
+        } else {
+            info!("'--leave-id' is None, do not need to leave cluster");
+            return Ok(false);
+        };
+
+        let addrs = &conf.leave_via;
+        info!("node-{} about to leave cluster via {:?}", leave_id, addrs);
+
+        #[allow(clippy::never_loop)]
+        for addr in addrs {
+            info!("leave cluster via {}...", addr);
+
+            let conn_res = RaftServiceClient::connect(format!("http://{}", addr)).await;
+            let mut raft_client = match conn_res {
+                Ok(c) => c,
+                Err(err) => {
+                    error!(
+                        "fail connecting to {} while leaving cluster, err: {:?}",
+                        addr, err
+                    );
+                    continue;
+                }
+            };
+
+            let req = ForwardRequest {
+                forward_to_leader: 1,
+                body: ForwardRequestBody::Leave(LeaveRequest { node_id: leave_id }),
+            };
+
+            let leave_res = raft_client.forward(req).await;
+            match leave_res {
+                Ok(resp) => {
+                    let reply = resp.into_inner();
+
+                    if !reply.data.is_empty() {
+                        info!("Done leaving cluster via {} reply: {:?}", addr, reply.data);
+                        return Ok(true);
+                    } else {
+                        error!("leaving cluster via {} fail: {:?}", addr, reply.error);
+                    }
+                }
+                Err(s) => {
+                    error!("leaving cluster via {} fail: {:?}", addr, s);
+                }
+            };
+        }
+        Err(MetaError::MetaServiceError(format!(
+            "leave cluster via {:?} failed",
+            addrs
+        )))
+    }
+
+    /// Join an existent cluster if `--join` is specified and this meta node is just created, i.e., not opening an already initialized store.
     #[tracing::instrument(level = "info", skip(conf, self))]
-    pub async fn join_cluster(&self, conf: &RaftConfig) -> MetaResult<()> {
+    pub async fn join_cluster(&self, conf: &RaftConfig, grpc_api_addr: String) -> MetaResult<()> {
         if conf.join.is_empty() {
-            tracing::info!("--join config is empty");
+            info!("'--join' is empty, do not need joining cluster");
             return Ok(());
         }
 
         // Try to join a cluster only when this node is just created.
         // Joining a node with log has risk messing up the data in this node and in the target cluster.
         if self.is_opened() {
-            tracing::info!("has opened");
+            info!("meta node is already initialized, skip joining it to a cluster");
             return Ok(());
         }
 
         let addrs = &conf.join;
-        // Join cluster use advertise host instead of listen host
-        let raft_api_advertise_host_endpoint = conf.raft_api_advertise_host_endpoint();
+
+        // Joining cluster has to use advertise host instead of listen host.
+        let advertise_endpoint = conf.raft_api_advertise_host_endpoint();
         #[allow(clippy::never_loop)]
         for addr in addrs {
-            tracing::info!("try to join cluster accross {}...", addr);
+            info!("try to join cluster via {}...", addr);
 
-            let mut client = match RaftServiceClient::connect(format!("http://{}", addr)).await {
+            let conn_res = RaftServiceClient::connect(format!("http://{}", addr)).await;
+            let mut raft_client = match conn_res {
                 Ok(c) => c,
                 Err(e) => {
-                    tracing::error!("connect to {} join cluster fail: {:?}", addr, e);
+                    error!("connect to {} join cluster fail: {:?}", addr, e);
                     continue;
                 }
             };
 
-            let admin_req = ForwardRequest {
+            let req = ForwardRequest {
                 forward_to_leader: 1,
                 body: ForwardRequestBody::Join(JoinRequest {
                     node_id: conf.id,
-                    endpoint: raft_api_advertise_host_endpoint.clone(),
+                    endpoint: advertise_endpoint.clone(),
+                    grpc_api_addr: grpc_api_addr.clone(),
                 }),
             };
 
-            let result: std::result::Result<RaftReply, Status> =
-                match client.forward(admin_req.clone()).await {
-                    Ok(r) => Ok(r.into_inner()),
-                    Err(s) => {
-                        tracing::error!("join cluster accross {} fail: {:?}", addr, s);
-                        continue;
-                    }
-                };
-
-            match result {
-                Ok(reply) => {
+            let join_res = raft_client.forward(req.clone()).await;
+            match join_res {
+                Ok(r) => {
+                    let reply = r.into_inner();
                     if !reply.data.is_empty() {
-                        tracing::info!("join cluster accross {} success: {:?}", addr, reply.data);
+                        info!("join cluster via {} success: {:?}", addr, reply.data);
                         return Ok(());
                     } else {
-                        tracing::error!("join cluster accross {} fail: {:?}", addr, reply.error);
+                        error!("join cluster via {} fail: {:?}", addr, reply.error);
                     }
                 }
                 Err(s) => {
-                    tracing::error!("join cluster accross {} fail: {:?}", addr, s);
+                    error!("join cluster via {} fail: {:?}", addr, s);
                 }
-            }
+            };
         }
-        Err(
-            MetaRaftError::JoinClusterFail(format!("join cluster accross addrs {:?} fail", addrs))
-                .into(),
-        )
+        Err(MetaError::MetaServiceError(format!(
+            "join cluster via {:?} fail",
+            addrs
+        )))
     }
 
-    async fn do_start(conf: &RaftConfig) -> Result<Arc<MetaNode>, MetaError> {
-        if conf.single {
-            let mn = MetaNode::open_create_boot(conf, Some(()), Some(()), Some(vec![])).await?;
+    async fn do_start(conf: &MetaConfig) -> Result<Arc<MetaNode>, MetaError> {
+        let raft_conf = &conf.raft_config;
+
+        let node = conf.get_node();
+
+        if raft_conf.single {
+            let mn = MetaNode::open_create_boot(raft_conf, Some(()), Some(()), true, node).await?;
             return Ok(mn);
         }
 
-        if !conf.join.is_empty() {
+        if !raft_conf.join.is_empty() {
             // Bring up a new node, join it into a cluster
-            let mn = MetaNode::open_create_boot(conf, Some(()), Some(()), None).await?;
+
+            let mn = MetaNode::open_create_boot(raft_conf, Some(()), Some(()), false, node).await?;
 
             if mn.is_opened() {
                 return Ok(mn);
@@ -527,19 +618,24 @@ impl MetaNode {
             return Ok(mn);
         }
         // open mode
-        let mn = MetaNode::open_create_boot(conf, Some(()), None, None).await?;
+
+        let mn = MetaNode::open_create_boot(raft_conf, Some(()), None, false, node).await?;
         Ok(mn)
     }
 
     /// Boot up the first node to create a cluster.
     /// For every cluster this func should be called exactly once.
-    #[tracing::instrument(level = "debug", skip(config), fields(config_id=config.config_id.as_str()))]
-    pub async fn boot(config: &RaftConfig) -> MetaResult<Arc<MetaNode>> {
+    #[tracing::instrument(level = "debug", skip(config), fields(config_id=config.raft_config.config_id.as_str()))]
+    pub async fn boot(config: &MetaConfig) -> MetaResult<Arc<MetaNode>> {
         // 1. Bring a node up as non voter, start the grpc service for raft communication.
         // 2. Initialize itself as leader, because it is the only one in the new cluster.
         // 3. Add itself to the cluster storage by committing an `add-node` log so that the cluster members(only this node) is persisted.
 
-        let mn = Self::open_create_boot(config, None, Some(()), Some(vec![])).await?;
+        let raft_conf = &config.raft_config;
+
+        let node = config.get_node();
+
+        let mn = Self::open_create_boot(raft_conf, None, Some(()), true, node).await?;
 
         Ok(mn)
     }
@@ -548,7 +644,7 @@ impl MetaNode {
     // - Initializing raft membership.
     // - Adding current node into the meta data.
     #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn init_cluster(&self, endpoint: Endpoint) -> MetaResult<()> {
+    pub async fn init_cluster(&self, node: Node) -> MetaResult<()> {
         let node_id = self.sto.id;
 
         let mut cluster_node_ids = BTreeSet::new();
@@ -559,9 +655,9 @@ impl MetaNode {
             .await
             .map_err(|x| MetaError::MetaServiceError(format!("{:?}", x)))?;
 
-        tracing::info!("initialized cluster");
+        info!("initialized cluster");
 
-        self.add_node(node_id, endpoint).await?;
+        self.add_node(node).await?;
 
         Ok(())
     }
@@ -571,16 +667,15 @@ impl MetaNode {
     /// This fn should be called once a node found it becomes leader.
     #[tracing::instrument(level = "debug", skip(self))]
     pub async fn add_configured_non_voters(&self) -> MetaResult<()> {
-        // TODO after leader established, add non-voter through apis
         let node_ids = self.sto.list_non_voters().await;
         for i in node_ids.iter() {
             let x = self.raft.add_learner(*i, true).await;
 
-            tracing::info!("add_non_voter result: {:?}", x);
+            info!("add_non_voter result: {:?}", x);
             if x.is_ok() {
-                tracing::info!("non-voter is added: {}", i);
+                info!("non-voter is added: {}", i);
             } else {
-                tracing::info!("non-voter already exist: {}", i);
+                info!("non-voter already exist: {}", i);
             }
         }
         Ok(())
@@ -601,6 +696,57 @@ impl MetaNode {
         sm.get_nodes()
     }
 
+    fn get_state_string(state: openraft::State) -> String {
+        match state {
+            openraft::State::Learner => "Learner".to_string(),
+            openraft::State::Follower => "Follower".to_string(),
+            openraft::State::Candidate => "Candidate".to_string(),
+            openraft::State::Leader => "Leader".to_string(),
+            openraft::State::Shutdown => "Shutdown".to_string(),
+        }
+    }
+
+    pub async fn get_status(&self) -> MetaResult<MetaNodeStatus> {
+        let voters = self.get_voters().await?;
+        let non_voters = self.get_non_voters().await?;
+
+        let endpoint = self
+            .sto
+            .get_node_endpoint(&self.sto.id)
+            .await
+            .map_err(|e| MetaError::MetaServiceError(format!("get self endpoint failed: {}", e)))?;
+
+        let db_size = self
+            .sto
+            .db
+            .size_on_disk()
+            .map_err(|_| MetaError::MetaServiceError("get db_size failed".to_string()))?;
+
+        let metrics = self.raft.metrics().borrow().clone();
+
+        let leader = if let Some(leader_id) = metrics.current_leader {
+            self.get_node(&leader_id).await?
+        } else {
+            None
+        };
+        Ok(MetaNodeStatus {
+            id: self.sto.id,
+            endpoint: endpoint.to_string(),
+            db_size,
+            state: MetaNode::get_state_string(metrics.state),
+            is_leader: metrics.state == openraft::State::Leader,
+            current_term: metrics.current_term,
+            last_log_index: metrics.last_log_index.unwrap_or(0),
+            last_applied: match metrics.last_applied {
+                Some(id) => id,
+                None => LogId::new(0, 0),
+            },
+            leader,
+            voters,
+            non_voters,
+        })
+    }
+
     #[tracing::instrument(level = "debug", skip(self))]
     pub async fn get_voters(&self) -> MetaResult<Vec<Node>> {
         // inconsistent get: from local state machine
@@ -617,7 +763,19 @@ impl MetaNode {
     pub async fn get_meta_addrs(&self) -> MetaResult<Vec<String>> {
         // inconsistent get: from local state machine
         let sm = self.sto.state_machine.read().await;
-        sm.get_metasrv_addrs()
+        let nodes = sm.get_nodes()?;
+        let endpoints: Vec<String> = nodes
+            .iter()
+            .map(|n| {
+                if let Some(addr) = n.grpc_api_addr.clone() {
+                    addr
+                } else {
+                    // for compatibility with old version that not have grpc_api_addr in NodeInfo.
+                    "".to_string()
+                }
+            })
+            .collect();
+        Ok(endpoints)
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -657,7 +815,7 @@ impl MetaNode {
         &self,
         req: ForwardRequest,
     ) -> Result<ForwardResponse, MetaError> {
-        tracing::debug!("handle_forwardable_request: {:?}", req);
+        debug!("handle_forwardable_request: {:?}", req);
 
         let forward = req.forward_to_leader;
 
@@ -716,22 +874,17 @@ impl MetaNode {
 
     /// Add a new node into this cluster.
     /// The node info is committed with raft, thus it must be called on an initialized node.
-    #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn add_node(
-        &self,
-        node_id: NodeId,
-        endpoint: Endpoint,
-    ) -> Result<AppliedState, MetaError> {
+    pub async fn add_node(&self, node: Node) -> Result<AppliedState, MetaError> {
         // TODO: use txid?
+        let node_id = node.name.parse::<u64>().map_err(|e| {
+            MetaError::MetaServiceError(format!("parse node_id error: {:?}", e.to_string()))
+        })?;
         let resp = self
             .write(LogEntry {
                 txid: None,
                 cmd: Cmd::AddNode {
-                    node_id,
-                    node: Node {
-                        name: node_id.to_string(),
-                        endpoint,
-                    },
+                    node_id: node_id as NodeId,
+                    node,
                 },
             })
             .await?;
@@ -741,43 +894,10 @@ impl MetaNode {
     /// Remove a node from this cluster.
     #[tracing::instrument(level = "debug", skip(self))]
     pub async fn remove_node(&self, node_id: NodeId) -> Result<AppliedState, MetaError> {
-        // TODO: use txid?
         let resp = self
             .write(LogEntry {
                 txid: None,
                 cmd: Cmd::RemoveNode { node_id },
-            })
-            .await?;
-        Ok(resp)
-    }
-
-    #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn add_metasrv_addr(
-        &self,
-        metasrv_name: String,
-        metasrv_addr: String,
-    ) -> Result<AppliedState, MetaError> {
-        let resp = self
-            .write(LogEntry {
-                txid: None,
-                cmd: Cmd::AddMetaSrvAddr {
-                    metasrv_name,
-                    metasrv_addr,
-                },
-            })
-            .await?;
-        Ok(resp)
-    }
-
-    #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn remove_metasrv_addr(
-        &self,
-        metasrv_name: String,
-    ) -> Result<AppliedState, MetaError> {
-        let resp = self
-            .write(LogEntry {
-                txid: None,
-                cmd: Cmd::RemoveMetaSrvAddr { metasrv_name },
             })
             .await?;
         Ok(resp)
@@ -790,7 +910,7 @@ impl MetaNode {
     /// Submit a write request to the known leader. Returns the response after applying the request.
     #[tracing::instrument(level = "debug", skip(self, req))]
     pub async fn write(&self, req: LogEntry) -> Result<AppliedState, MetaError> {
-        tracing::debug!("req: {:?}", req);
+        debug!("req: {:?}", req);
 
         let res = self
             .handle_forwardable_request(ForwardRequest {
@@ -830,7 +950,7 @@ impl MetaNode {
 
             let changed = rx.changed().await;
             if changed.is_err() {
-                tracing::info!("raft metrics tx closed");
+                info!("raft metrics tx closed");
                 return 0;
             }
         }

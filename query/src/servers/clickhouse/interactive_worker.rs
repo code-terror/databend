@@ -15,17 +15,17 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use common_tracing::tracing;
 use metrics::histogram;
 use opensrv_clickhouse::connection::Connection;
 use opensrv_clickhouse::CHContext;
 use opensrv_clickhouse::ClickHouseSession;
+use tracing::error;
 
+use crate::auth::Credential;
 use crate::servers::clickhouse::interactive_worker_base::InteractiveWorkerBase;
 use crate::servers::clickhouse::writers::to_clickhouse_err;
 use crate::servers::clickhouse::writers::QueryWriter;
 use crate::sessions::SessionRef;
-use crate::users::auth::auth_mgr::Credential;
 
 pub struct InteractiveWorker {
     session: SessionRef,
@@ -50,12 +50,10 @@ impl ClickHouseSession for InteractiveWorker {
 
         let session = self.session.clone();
         let get_query_result = InteractiveWorkerBase::do_query(ctx, session);
-        let query_ctx = self
+        let format = self
             .session
-            .get_shared_query_context()
-            .await
+            .get_format_settings()
             .map_err(to_clickhouse_err)?;
-        let format = query_ctx.get_format_settings().map_err(to_clickhouse_err)?;
         if let Err(cause) = query_writer.write(get_query_result.await, &format).await {
             let new_error = cause.add_message(&ctx.state.query);
             return Err(to_clickhouse_err(new_error));
@@ -74,11 +72,6 @@ impl ClickHouseSession for InteractiveWorker {
     }
 
     // TODO: remove it
-    fn server_display_name(&self) -> &str {
-        "databend"
-    }
-
-    // TODO: remove it
     fn dbms_version_major(&self) -> u64 {
         2021
     }
@@ -89,8 +82,9 @@ impl ClickHouseSession for InteractiveWorker {
     }
 
     // TODO: remove it
-    fn dbms_version_patch(&self) -> u64 {
-        0
+    // the MIN_SERVER_REVISION for suggestions is 54406
+    fn dbms_tcp_protocol_version(&self) -> u64 {
+        54405
     }
 
     // TODO: remove it
@@ -99,9 +93,18 @@ impl ClickHouseSession for InteractiveWorker {
     }
 
     // TODO: remove it
-    // the MIN_SERVER_REVISION for suggestions is 54406
-    fn dbms_tcp_protocol_version(&self) -> u64 {
-        54405
+    fn server_display_name(&self) -> &str {
+        "databend"
+    }
+
+    // TODO: remove it
+    fn dbms_version_patch(&self) -> u64 {
+        0
+    }
+
+    // TODO: remove it
+    fn get_progress(&self) -> opensrv_clickhouse::types::Progress {
+        unimplemented!()
     }
 
     async fn authenticate(&self, user: &str, password: &[u8], client_addr: &str) -> bool {
@@ -115,46 +118,34 @@ impl ClickHouseSession for InteractiveWorker {
         let ctx = self.session.create_query_context().await;
         match ctx {
             Ok(c) => {
-                let user_info_auth = c.get_auth_manager().auth(&credential).await;
+                let user_info_auth = c
+                    .get_auth_manager()
+                    .auth(c.get_current_session(), &credential)
+                    .await;
                 match user_info_auth {
-                    Ok((tenant_id, user_info)) => {
-                        self.session.set_current_user(user_info);
-                        if let Some(tenant_id) = tenant_id {
-                            self.session.set_current_tenant(tenant_id);
-                        }
-                        true
-                    }
+                    Ok(_) => true,
                     Err(failure) => {
-                        tracing::error!(
+                        error!(
                             "ClickHouse handler authenticate failed, \
                              user: {}, \
                              client_address: {}, \
                              cause: {:?}",
-                            user,
-                            client_addr,
-                            failure
+                            user, client_addr, failure
                         );
                         false
                     }
                 }
             }
             Err(e) => {
-                tracing::error!(
+                error!(
                     "ClickHouse handler authenticate failed, \
                      user: {}, \
                      client_address: {}, \
                      cause: {:?}",
-                    user,
-                    client_addr,
-                    e
+                    user, client_addr, e
                 );
                 false
             }
         }
-    }
-
-    // TODO: remove it
-    fn get_progress(&self) -> opensrv_clickhouse::types::Progress {
-        unimplemented!()
     }
 }

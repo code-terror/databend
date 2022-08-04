@@ -15,9 +15,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use common_meta_types::TableIdent;
-use common_meta_types::TableInfo;
-use common_meta_types::TableMeta;
+use common_meta_app::schema::TableIdent;
+use common_meta_app::schema::TableInfo;
+use common_meta_app::schema::TableMeta;
 
 use crate::storages::view::view_table::QUERY;
 use crate::storages::view::ViewTable;
@@ -35,7 +35,7 @@ impl ColumnsTable {
             1 AS ordinal_position,
             NULL AS column_default,
             is_nullable AS is_nullable,
-            data_type AS data_type,
+            type AS data_type,
             NULL AS character_maximum_length,
             NULL AS character_octet_length,
             NULL AS numeric_precision,
@@ -50,30 +50,7 @@ impl ColumnsTable {
             NULL AS collation_name,
             NULL AS domain_catalog,
             NULL AS domain_schema,
-            NULL AS domain_name,
-            database AS TABLE_CATALOG,
-            database AS TABLE_SCHEMA,
-            table AS TABLE_NAME,
-            name AS COLUMN_NAME,
-            1 AS ORDINAL_POSITION,
-            NULL AS COLUMN_DEFAULT,
-            is_nullable AS IS_NULLABLE,
-            data_type AS DATA_TYPE,
-            NULL AS CHARACTER_MAXIMUM_LENGTH,
-            NULL AS CHARACTER_OCTET_LENGTH,
-            NULL AS NUMERIC_PRECISION,
-            NULL AS NUMERIC_PRECISION_RADIX,
-            NULL AS NUMERIC_SCALE,
-            NULL AS DATETIME_PRECISION,
-            NULL AS CHARACTER_SET_CATALOG,
-            NULL AS CHARACTER_SET_SCHEMA,
-            NULL AS CHARACTER_SET_NAME,
-            NULL AS COLLATION_CATALOG,
-            NULL AS COLLATION_SCHEMA,
-            NULL AS COLLATION_NAME,
-            NULL AS DOMAIN_CATALOG,
-            NULL AS DOMAIN_SCHEMA,
-            NULL AS DOMAIN_NAME
+            NULL AS domain_name
         FROM system.columns;";
 
         let mut options = BTreeMap::new();

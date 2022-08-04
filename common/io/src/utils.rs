@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use std::cmp;
-use std::path::PathBuf;
 
-use bincode::Options;
 use bytes::BufMut;
 use common_exception::Result;
 
@@ -70,11 +68,8 @@ pub fn serialize_into_buf<W: bytes::BufMut, T: serde::Serialize>(
     buf: &mut W,
     value: &T,
 ) -> Result<()> {
-    let writer = BufMut::writer(buf);
-    bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .with_varint_length_offset_encoding()
-        .serialize_into(writer, value)?;
+    let mut writer = BufMut::writer(buf);
+    bincode::serde::encode_into_std_write(value, &mut writer, bincode::config::standard())?;
 
     Ok(())
 }
@@ -82,36 +77,9 @@ pub fn serialize_into_buf<W: bytes::BufMut, T: serde::Serialize>(
 /// bincode deserialize_from wrap with optimized config
 #[inline]
 pub fn deserialize_from_slice<T: serde::de::DeserializeOwned>(slice: &mut &[u8]) -> Result<T> {
-    let value = bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .with_varint_length_offset_encoding()
-        .deserialize_from(slice)?;
+    let (value, _) = bincode::serde::decode_from_slice(slice, bincode::config::standard())?;
 
     Ok(value)
-}
-
-#[inline]
-pub fn get_abs_path(root: &str, path: &str) -> String {
-    // Joining an absolute path replaces the existing path, we need to
-    // normalize it before.
-    let path = path
-        .split('/')
-        .filter(|v| !v.is_empty())
-        .collect::<Vec<&str>>()
-        .join("/");
-
-    PathBuf::from(root).join(path).to_string_lossy().to_string()
-}
-
-// todo(xuanwo): opendal support meta name (https://github.com/datafuselabs/opendal/issues/150)
-#[inline]
-pub fn get_file_name(path: &str) -> String {
-    let path = path
-        .split('/')
-        .filter(|v| !v.is_empty())
-        .collect::<Vec<&str>>();
-
-    path[path.len() - 1].to_string()
 }
 
 pub fn is_control_ascii(c: u8) -> bool {

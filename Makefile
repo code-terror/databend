@@ -7,14 +7,6 @@ NUM_CPUS ?= 2
 TENANT_ID ?= "tenant"
 CLUSTER_ID ?= "test"
 
-# yamllint vars
-YAML_FILES ?= $(shell find . -path ./target -prune -type f -name '*.yaml' -or -name '*.yml')
-YAML_DOCKER_ARGS ?= run --rm --user "$$(id -u)" -v "$${PWD}:/component" --workdir /component
-YAMLLINT_ARGS ?= --no-warnings
-YAMLLINT_CONFIG ?= .yamllint.yml
-YAMLLINT_IMAGE ?= docker.io/cytopia/yamllint:latest
-YAMLLINT_DOCKER ?= docker $(YAML_DOCKER_ARGS) $(YAMLLINT_IMAGE)
-
 CARGO_TARGET_DIR ?= $(CURDIR)/target
 
 # Setup dev toolchain
@@ -22,30 +14,32 @@ setup:
 	bash ./scripts/setup/dev_setup.sh
 
 fmt:
-	cargo fmt
+	cargo fmt --all
 
 lint:
-	cargo fmt
-	cargo clippy --all -- -D warnings
+	cargo fmt --all
 	# Cargo.toml file formatter(make setup to install)
 	taplo fmt
 	# Python file formatter(make setup to install)
 	yapf -ri tests/
 	# Bash file formatter(make setup to install)
 	shfmt -l -w scripts/*
+	cargo clippy --workspace --all-targets -- -D warnings
 
-lint-yaml: $(YAML_FILES)
-	$(YAMLLINT_DOCKER) -f parsable -c $(YAMLLINT_CONFIG) $(YAMLLINT_ARGS) -- $?
+lint-yaml:
+	yamllint -f auto .
 
-miri:
-	cargo miri setup
-	MIRIFLAGS="-Zmiri-disable-isolation" cargo miri test
+check-license:
+	license-eye -v info -c .licenserc.yaml header check
 
 run: build-release
-	bash ./scripts/ci/deploy/databend-query-standalone.sh release
+	BUILD_PROFILE=release bash ./scripts/ci/deploy/databend-query-standalone.sh
 
-run-debug: build-debug
+run-debug: build
 	bash ./scripts/ci/deploy/databend-query-standalone.sh
+
+run-debug-management: build
+	bash ./scripts/ci/deploy/databend-query-management-mode.sh
 
 build:
 	bash ./scripts/build/build-debug.sh
@@ -62,53 +56,44 @@ endif
 build-native:
 	bash ./scripts/build/build-native.sh
 
-build-debug:
-	echo "Please use 'make build' instead"
-
-cross-compile-debug:
-	cross build --target aarch64-unknown-linux-gnu
-
-cross-compile-release:
-	RUSTFLAGS="-C link-arg=-Wl,--compress-debug-sections=zlib-gabi" cross build --target aarch64-unknown-linux-gnu --release
-
 unit-test:
 	ulimit -n 10000;ulimit -s 16384; RUST_LOG="ERROR" bash ./scripts/ci/ci-run-unit-tests.sh
 
-embedded-meta-test: build-debug
+embedded-meta-test: build
 	rm -rf ./_meta_embedded*
 	bash ./scripts/ci/ci-run-tests-embedded-meta.sh
 
-stateless-test: build-debug
+stateless-test: build
 	rm -rf ./_meta*/
 	rm -rf .databend
 	ulimit -n 10000;ulimit -s 16384; bash ./scripts/ci/ci-run-tests-embedded-meta.sh
 
-sqllogic-test: build-debug
+sqllogic-test: build
 	rm -rf ./_meta*/
 	ulimit -n 10000;ulimit -s 16384; bash ./scripts/ci/ci-run-sqllogic-tests.sh
 
-management-test: build-debug
-	rm -rf ./_meta*/
-	ulimit -n 10000;ulimit -s 16384; bash ./scripts/ci/ci-run-stateless-tests-management-mode.sh
-
-stateless-cluster-test: build-debug
+stateless-cluster-test: build
 	rm -rf ./_meta*/
 	bash ./scripts/ci/ci-run-stateless-tests-cluster.sh
 
-stateless-cluster-test-tls: build-debug
+stateless-cluster-test-tls: build
 	rm -rf ./_meta*/
 	bash ./scripts/ci/ci-run-stateless-tests-cluster-tls.sh
 
-metactl-test: build-debug
+metactl-test:
 	bash ./tests/metactl/test-metactl.sh
+	bash ./tests/metactl/test-metactl-restore-new-cluster.sh
+
+meta-kvapi-test:
+	bash ./tests/meta-kvapi/test-meta-kvapi.sh
+
+meta-bench: build-release
+	bash ./scripts/benchmark/run-meta-benchmark.sh 10 1000
 
 test: unit-test stateless-test sqllogic-test metactl-test
 
 docker:
 	docker build --network host -f docker/Dockerfile -t ${HUB}/databend-query:${TAG} .
-
-k8s-docker:
-	bash ./scripts/build/build-k8s-runner.sh
 
 # experiment feature: take a look at docker/README.md for detailed multi architecture image build support
 dockerx:
@@ -116,10 +101,6 @@ dockerx:
 
 build-tool:
 	bash ./scripts/build/build-tool-runner.sh
-
-# generate common/functions/src/scalars/arithmetics/result_type.rs
-run-codegen:
-	cargo run --manifest-path=common/codegen/Cargo.toml
 
 # used for the build of dev container
 dev-container:

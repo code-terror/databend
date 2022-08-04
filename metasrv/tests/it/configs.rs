@@ -63,14 +63,14 @@ single = false
 join = ["j1", "j2"]
 id = 20
 sled_tree_prefix = "sled_foo"
+cluster_name = "foo_cluster"
              "#
     )?;
 
     temp_env::with_var("METASRV_CONFIG_FILE", Some(file_path.clone()), || {
         let cfg = Config::load().expect("load must success");
-        assert_eq!(cfg.log_level, "ERROR");
-        assert_eq!(cfg.log_dir, "foo/logs");
-        assert_eq!(cfg.metric_api_address, "127.0.0.1:8000");
+        assert_eq!(cfg.log.file.level, "ERROR");
+        assert_eq!(cfg.log.file.dir, "foo/logs");
         assert_eq!(cfg.admin_api_address, "127.0.0.1:9000");
         assert_eq!(cfg.admin_tls_server_cert, "admin tls cert");
         assert_eq!(cfg.admin_tls_server_key, "admin tls key");
@@ -89,6 +89,7 @@ sled_tree_prefix = "sled_foo"
         assert_eq!(cfg.raft_config.join, vec!["j1", "j2"]);
         assert_eq!(cfg.raft_config.id, 20);
         assert_eq!(cfg.raft_config.sled_tree_prefix, "sled_foo");
+        assert_eq!(cfg.raft_config.cluster_name, "foo_cluster");
     });
 
     temp_env::with_vars(
@@ -101,7 +102,7 @@ sled_tree_prefix = "sled_foo"
         ],
         || {
             let cfg = Config::load().expect("load must success");
-            assert_eq!(cfg.log_level, "DEBUG");
+            assert_eq!(cfg.log.file.level, "DEBUG");
         },
     );
 

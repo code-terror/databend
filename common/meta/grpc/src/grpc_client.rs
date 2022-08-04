@@ -15,17 +15,23 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use common_arrow::arrow_format::flight::data::BasicAuth;
+use common_base::base::tokio::select;
 use common_base::base::tokio::sync::mpsc;
 use common_base::base::tokio::sync::mpsc::Receiver;
 use common_base::base::tokio::sync::mpsc::Sender;
 use common_base::base::tokio::sync::oneshot;
+use common_base::base::tokio::sync::oneshot::Receiver as OneRecv;
+use common_base::base::tokio::sync::oneshot::Sender as OneSend;
 use common_base::base::tokio::sync::RwLock;
+use common_base::base::tokio::time::sleep;
 use common_base::base::Runtime;
 use common_base::base::TrySpawn;
 use common_base::containers::ItemManager;
 use common_base::containers::Pool;
+use common_base::containers::TtlHashMap;
 use common_exception::ErrorCode;
 use common_exception::Result;
 use common_grpc::ConnectionFactory;
@@ -38,20 +44,27 @@ use common_meta_types::protobuf::meta_service_client::MetaServiceClient;
 use common_meta_types::protobuf::Empty;
 use common_meta_types::protobuf::ExportedChunk;
 use common_meta_types::protobuf::HandshakeRequest;
+use common_meta_types::protobuf::MemberListReply;
 use common_meta_types::protobuf::MemberListRequest;
 use common_meta_types::protobuf::RaftReply;
 use common_meta_types::protobuf::RaftRequest;
 use common_meta_types::protobuf::WatchRequest;
 use common_meta_types::protobuf::WatchResponse;
 use common_meta_types::ConnectionError;
+use common_meta_types::InvalidArgument;
 use common_meta_types::MetaError;
 use common_meta_types::MetaNetworkError;
 use common_meta_types::MetaResultError;
 use common_meta_types::TxnReply;
 use common_meta_types::TxnRequest;
-use common_tracing::tracing;
+use common_metrics::label_counter_with_val_and_labels;
+use common_metrics::label_decrement_gauge_with_val_and_labels;
+use common_metrics::label_histogram_with_val;
+use common_metrics::label_increment_gauge_with_val_and_labels;
 use futures::stream::StreamExt;
+use parking_lot::Mutex;
 use prost::Message;
+use semver::Version;
 use serde::de::DeserializeOwned;
 use tonic::async_trait;
 use tonic::client::GrpcService;
@@ -59,17 +72,30 @@ use tonic::codegen::InterceptedService;
 use tonic::metadata::MetadataValue;
 use tonic::service::Interceptor;
 use tonic::transport::Channel;
-use tonic::transport::Endpoint;
 use tonic::Code;
 use tonic::Request;
 use tonic::Status;
+use tracing::debug;
+use tracing::info;
+use tracing::warn;
 
+use crate::from_digit_ver;
 use crate::grpc_action::MetaGrpcReadReq;
 use crate::grpc_action::MetaGrpcWriteReq;
 use crate::grpc_action::RequestFor;
 use crate::message;
+use crate::to_digit_ver;
+use crate::METACLI_COMMIT_SEMVER;
+use crate::MIN_METASRV_SEMVER;
 
 const AUTH_TOKEN_KEY: &str = "auth-token-bin";
+const META_GRPC_CLIENT_REQUEST_DURATION_MS: &str = "meta_grpc_client_request_duration_ms";
+const META_GRPC_CLIENT_REQUEST_INFLIGHT: &str = "meta_grpc_client_request_inflight";
+const META_GRPC_CLIENT_REQUEST_SUCCESS: &str = "meta_grpc_client_request_success";
+const META_GRPC_CLIENT_REQUEST_FAILED: &str = "meta_grpc_client_request_fail";
+const META_GRPC_MAKE_CLIENT_FAILED: &str = "meta_grpc_make_client_fail";
+const LABEL_ENDPOINT: &str = "endpoint";
+const LABEL_ERROR: &str = "error";
 
 #[derive(Debug)]
 struct MetaChannelManager {
@@ -78,8 +104,9 @@ struct MetaChannelManager {
 }
 
 impl MetaChannelManager {
-    fn build_endpoint(&self, addr: &String) -> std::result::Result<Endpoint, MetaError> {
-        let ch = ConnectionFactory::create_rpc_endpoint(addr, self.timeout, self.conf.clone())
+    async fn build_channel(&self, addr: &String) -> std::result::Result<Channel, MetaError> {
+        let ch = ConnectionFactory::create_rpc_channel(addr, self.timeout, self.conf.clone())
+            .await
             .map_err(|e| match e {
                 GrpcConnectionError::InvalidUri { .. } => MetaNetworkError::BadAddressFormat(
                     AnyError::new(&e).add_context(|| "while creating rpc channel"),
@@ -97,18 +124,12 @@ impl MetaChannelManager {
 
 #[async_trait]
 impl ItemManager for MetaChannelManager {
-    type Key = Vec<String>;
+    type Key = String;
     type Item = Channel;
     type Error = MetaError;
 
-    async fn build(&self, endpoints: &Self::Key) -> std::result::Result<Self::Item, Self::Error> {
-        let channel_eps: std::result::Result<Vec<Endpoint>, MetaError> = (*endpoints)
-            .iter()
-            .map(|a| self.build_endpoint(a))
-            .collect();
-        let channel_eps = channel_eps?;
-        let ch = Channel::balance_list(channel_eps.into_iter());
-        Ok(ch)
+    async fn build(&self, addr: &Self::Key) -> std::result::Result<Self::Item, Self::Error> {
+        self.build_channel(addr).await
     }
 
     async fn check(&self, mut ch: Self::Item) -> std::result::Result<Self::Item, Self::Error> {
@@ -121,29 +142,15 @@ impl ItemManager for MetaChannelManager {
     }
 }
 
-pub struct MetaGrpcClient {
-    conn_pool: Pool<MetaChannelManager>,
-    endpoints: RwLock<Vec<String>>,
-    username: String,
-    password: String,
-    token: RwLock<Option<Vec<u8>>>,
-
-    /// Dedicated runtime to support meta client background tasks.
-    ///
-    /// In order not to let a blocking operation(such as calling the new PipelinePullingExecutor) in a tokio runtime block meta-client background tasks.
-    /// If a background task is blocked, no meta-client will be able to proceed if meta-client is reused.
-    ///
-    /// Note that a thread_pool tokio runtime does not help: a scheduled tokio-task resides in `filo_slot` won't be stolen by other tokio-workers.
-    /// TODO: dead code
-    #[allow(dead_code)]
-    rt: Arc<Runtime>,
-}
-
 /// A handle to access meta-client worker.
 /// The worker will be actually running in a dedicated runtime: `MetaGrpcClient.rt`.
 pub struct ClientHandle {
     /// For sending request to meta-client worker.
     pub(crate) req_tx: Sender<message::ClientWorkerRequest>,
+    /// Notify auto sync to stop.
+    /// `oneshot::Receiver` impl `Drop` by sending a closed notification to the `Sender` half.
+    #[allow(dead_code)]
+    cancel_auto_sync_rx: OneRecv<()>,
 }
 
 impl ClientHandle {
@@ -161,18 +168,37 @@ impl ClientHandle {
             req: req.into(),
         };
 
-        self.req_tx.send(req).await.map_err(|e| {
+        label_increment_gauge_with_val_and_labels(META_GRPC_CLIENT_REQUEST_INFLIGHT, vec![], 1.0);
+
+        let res = self.req_tx.send(req).await.map_err(|e| {
             MetaError::Fatal(
                 AnyError::new(&e).add_context(|| "when sending req to MetaGrpcClient worker"),
             )
-        })?;
+        });
+
+        if let Err(err) = res {
+            label_decrement_gauge_with_val_and_labels(
+                META_GRPC_CLIENT_REQUEST_INFLIGHT,
+                vec![],
+                1.0,
+            );
+
+            return Err(err);
+        }
 
         let res = rx.await.map_err(|e| {
+            label_decrement_gauge_with_val_and_labels(
+                META_GRPC_CLIENT_REQUEST_INFLIGHT,
+                vec![],
+                1.0,
+            );
+
             MetaError::Fatal(
                 AnyError::new(&e).add_context(|| "when recv resp from MetaGrpcClient worker"),
             )
         })?;
 
+        label_decrement_gauge_with_val_and_labels(META_GRPC_CLIENT_REQUEST_INFLIGHT, vec![], 1.0);
         let resp = res?;
 
         let r = Resp::try_from(resp).map_err(|e| {
@@ -193,6 +219,30 @@ impl ClientHandle {
     > {
         self.request(message::MakeClient {}).await
     }
+
+    pub async fn get_endpoints(&self) -> std::result::Result<Vec<String>, MetaError> {
+        self.request(message::GetEndpoints {}).await
+    }
+}
+
+pub struct MetaGrpcClient {
+    conn_pool: Pool<MetaChannelManager>,
+    endpoints: RwLock<Vec<String>>,
+    username: String,
+    password: String,
+    current_endpoint: Arc<Mutex<Option<String>>>,
+    unhealthy_endpoints: Mutex<TtlHashMap<String, ()>>,
+    auto_sync_interval: Option<Duration>,
+
+    /// Dedicated runtime to support meta client background tasks.
+    ///
+    /// In order not to let a blocking operation(such as calling the new PipelinePullingExecutor) in a tokio runtime block meta-client background tasks.
+    /// If a background task is blocked, no meta-client will be able to proceed if meta-client is reused.
+    ///
+    /// Note that a thread_pool tokio runtime does not help: a scheduled tokio-task resides in `filo_slot` won't be stolen by other tokio-workers.
+    /// TODO: dead code
+    #[allow(dead_code)]
+    rt: Arc<Runtime>,
 }
 
 impl MetaGrpcClient {
@@ -206,31 +256,29 @@ impl MetaGrpcClient {
     ///
     /// The worker is a singleton and the returned handle is cheap to clone.
     /// When all handles are dropped the worker will quit, then the runtime will be destroyed.
-    pub async fn try_new(
-        conf: &RpcClientConf,
-    ) -> std::result::Result<Arc<ClientHandle>, ErrorCode> {
+    pub fn try_new(conf: &RpcClientConf) -> std::result::Result<Arc<ClientHandle>, ErrorCode> {
         Self::try_create(
             conf.get_endpoints(),
             &conf.username,
             &conf.password,
             conf.timeout,
+            conf.auto_sync_interval,
             conf.tls_conf.clone(),
         )
-        .await
     }
 
     #[tracing::instrument(level = "debug", skip(password))]
-    pub async fn try_create(
+    pub fn try_create(
         endpoints: Vec<String>,
         username: &str,
         password: &str,
         timeout: Option<Duration>,
+        auto_sync_interval: Option<Duration>,
         conf: Option<RpcClientTlsConfig>,
     ) -> Result<Arc<ClientHandle>> {
-        let mgr = MetaChannelManager {
-            timeout,
-            conf: conf.clone(),
-        };
+        Self::endpoints_non_empty(&endpoints)?;
+
+        let mgr = MetaChannelManager { timeout, conf };
 
         let rt = Runtime::with_worker_threads(1, Some("meta-client-rt".to_string()))
             .map_err(|e| e.add_message_back("when creating meta-client"))?;
@@ -239,20 +287,26 @@ impl MetaGrpcClient {
         // Build the handle-worker pair
 
         let (tx, rx) = mpsc::channel(256);
+        let (one_tx, one_rx) = oneshot::channel::<()>();
 
-        let handle = Arc::new(ClientHandle { req_tx: tx });
+        let handle = Arc::new(ClientHandle {
+            req_tx: tx,
+            cancel_auto_sync_rx: one_rx,
+        });
 
         let worker = Arc::new(Self {
             conn_pool: Pool::new(mgr, Duration::from_millis(50)),
-            endpoints: RwLock::new(vec![]),
+            endpoints: RwLock::new(endpoints),
+            current_endpoint: Arc::new(Mutex::new(None)),
+            unhealthy_endpoints: Mutex::new(TtlHashMap::new(Duration::from_secs(120))),
+            auto_sync_interval,
             username: username.to_string(),
             password: password.to_string(),
-            token: RwLock::new(None),
             rt: rt.clone(),
         });
-        worker.set_endpoints(endpoints).await?;
 
-        rt.spawn(Self::worker_loop(worker, rx));
+        rt.spawn(Self::worker_loop(worker.clone(), rx));
+        rt.spawn(Self::auto_sync_endpoints(worker, one_tx));
 
         Ok(handle)
     }
@@ -260,22 +314,23 @@ impl MetaGrpcClient {
     /// A worker runs a receiving-loop to accept user-request to metasrv and deals with request in the dedicated runtime.
     #[tracing::instrument(level = "info", skip_all)]
     async fn worker_loop(self: Arc<Self>, mut req_rx: Receiver<message::ClientWorkerRequest>) {
-        tracing::info!("MetaGrpcClient::worker spawned");
+        info!("MetaGrpcClient::worker spawned");
 
         loop {
+            let start = Instant::now();
             let t = req_rx.recv().await;
             let req = match t {
                 None => {
-                    tracing::info!("MetaGrpcClient handle closed. worker quit");
+                    info!("MetaGrpcClient handle closed. worker quit");
                     return;
                 }
                 Some(x) => x,
             };
 
-            tracing::debug!(req = debug(&req), "MetaGrpcClient recv request");
+            debug!(req = debug(&req), "MetaGrpcClient recv request");
 
             if req.resp_tx.is_closed() {
-                tracing::debug!(
+                debug!(
                     req = debug(&req),
                     "MetaGrpcClient request.resp_tx is closed, cancel handling this request"
                 );
@@ -318,16 +373,65 @@ impl MetaGrpcClient {
                     let resp = self.make_client().await;
                     resp.map(message::Response::MakeClient)
                 }
+                message::Request::GetEndpoints(_) => {
+                    let resp = self.get_endpoints().await;
+                    Ok(message::Response::GetEndpoints(resp))
+                }
             };
 
-            tracing::debug!(
+            debug!(
                 resp = debug(&resp),
                 "MetaGrpcClient send response to the handle"
             );
 
             let res = resp_tx.send(resp);
-            if let Err(err) = res {
-                tracing::warn!(
+            let current_endpoint = self.current_endpoint.lock();
+            if let Some(current_endpoint) = &*current_endpoint {
+                label_histogram_with_val(
+                    META_GRPC_CLIENT_REQUEST_DURATION_MS,
+                    vec![(LABEL_ENDPOINT, current_endpoint.to_string())],
+                    start.elapsed().as_millis() as f64,
+                );
+
+                if let Err(result) = res {
+                    match result {
+                        Err(err) => {
+                            label_counter_with_val_and_labels(
+                                META_GRPC_CLIENT_REQUEST_FAILED,
+                                vec![
+                                    (LABEL_ENDPOINT, current_endpoint.to_string()),
+                                    (LABEL_ERROR, err.to_string()),
+                                ],
+                                1,
+                            );
+                            warn!(
+                                "MetaGrpcClient failed to send response to the handle:{:?}",
+                                err
+                            );
+                        }
+                        Ok(_) => {
+                            label_counter_with_val_and_labels(
+                                META_GRPC_CLIENT_REQUEST_FAILED,
+                                vec![
+                                    (LABEL_ENDPOINT, current_endpoint.to_string()),
+                                    (LABEL_ERROR, "MetaGrpcClient recv-end closed".to_string()),
+                                ],
+                                1,
+                            );
+                            warn!(
+                                "MetaGrpcClient failed to send response to the handle. recv-end closed"
+                            );
+                        }
+                    }
+                } else {
+                    label_counter_with_val_and_labels(
+                        META_GRPC_CLIENT_REQUEST_SUCCESS,
+                        vec![(LABEL_ENDPOINT, current_endpoint.to_string())],
+                        1,
+                    );
+                }
+            } else if let Err(err) = res {
+                warn!(
                     err = debug(err),
                     "MetaGrpcClient failed to send response to the handle. recv-end closed"
                 );
@@ -342,29 +446,104 @@ impl MetaGrpcClient {
         MetaServiceClient<InterceptedService<Channel, AuthInterceptor>>,
         MetaError,
     > {
-        let channel = {
-            let eps = self.endpoints.read().await;
-            debug_assert!(!eps.is_empty());
+        let mut eps = self.get_endpoints().await;
+        debug_assert!(!eps.is_empty());
 
-            self.conn_pool.get(&*eps).await?
-        };
+        if eps.len() > 1 {
+            // remove unhealthy endpoints
+            let ues = self.unhealthy_endpoints.lock();
+            eps.retain(|e| !ues.contains_key(e));
+        }
 
-        let mut client = MetaServiceClient::new(channel.clone());
+        for (addr, is_last) in eps.iter().enumerate().map(|(i, a)| (a, i == eps.len() - 1)) {
+            let channel = self.make_channel(Some(addr)).await;
+            match channel {
+                Ok(c) => {
+                    let mut client = MetaServiceClient::new(c.clone());
 
-        let mut t = self.token.write().await;
-        let token = match t.clone() {
-            Some(t) => t,
-            None => {
-                let new_token =
-                    MetaGrpcClient::handshake(&mut client, &self.username, &self.password).await?;
-                *t = Some(new_token.clone());
-                new_token
+                    let new_token = Self::handshake(
+                        &mut client,
+                        &METACLI_COMMIT_SEMVER,
+                        &MIN_METASRV_SEMVER,
+                        &self.username,
+                        &self.password,
+                    )
+                    .await;
+                    match new_token {
+                        Ok(token) => {
+                            return Ok(MetaServiceClient::with_interceptor(c, AuthInterceptor {
+                                token,
+                            }));
+                        }
+                        Err(e) => {
+                            warn!("handshake error when make client: {:?}", e);
+                            {
+                                let mut ue = self.unhealthy_endpoints.lock();
+                                ue.insert(addr.to_string(), ());
+                            }
+                            if is_last {
+                                // reach to last addr
+                                return Err(e);
+                            }
+                            continue;
+                        }
+                    };
+                }
+
+                Err(e) => {
+                    {
+                        let mut ue = self.unhealthy_endpoints.lock();
+                        ue.insert(addr.to_string(), ());
+                    }
+                    if is_last {
+                        return Err(e);
+                    }
+                    continue;
+                }
             }
+        }
+        Err(MetaError::InvalidConfig("endpoints is empty".to_string()))
+    }
+
+    async fn make_channel(&self, addr: Option<&String>) -> std::result::Result<Channel, MetaError> {
+        let addr = if let Some(addr) = addr {
+            addr.clone()
+        } else {
+            let eps = self.endpoints.read().await;
+            eps.first().unwrap().clone()
         };
+        let ch = self.conn_pool.get(&addr).await;
+        {
+            let mut current_endpoint = self.current_endpoint.lock();
+            *current_endpoint = Some(addr.clone());
+        }
+        match ch {
+            Ok(c) => Ok(c),
+            Err(e) => {
+                warn!(
+                    "grpc_client create channel with {} faild, err: {:?}",
+                    addr, e
+                );
+                label_counter_with_val_and_labels(
+                    META_GRPC_MAKE_CLIENT_FAILED,
+                    vec![(LABEL_ENDPOINT, addr.to_string())],
+                    1,
+                );
+                Err(e)
+            }
+        }
+    }
 
-        let client = MetaServiceClient::with_interceptor(channel, AuthInterceptor { token });
+    pub fn endpoints_non_empty(endpoints: &[String]) -> std::result::Result<(), MetaError> {
+        if endpoints.is_empty() {
+            return Err(MetaError::InvalidConfig("endpoints is empty".to_string()));
+        }
+        Ok(())
+    }
 
-        Ok(client)
+    async fn get_endpoints(&self) -> Vec<String> {
+        let eps = self.endpoints.read().await;
+        (*eps).clone()
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -372,8 +551,20 @@ impl MetaGrpcClient {
         &self,
         endpoints: Vec<String>,
     ) -> std::result::Result<(), MetaError> {
-        if endpoints.is_empty() {
-            return Err(MetaError::InvalidConfig("endpoints is empty".to_string()));
+        Self::endpoints_non_empty(&endpoints)?;
+
+        // Older meta nodes may not store endpoint information and need to be filtered out.
+        let distinct_cnt = endpoints.iter().filter(|n| !(*n).is_empty()).count();
+
+        // If the fetched endpoints are less than the majority of the current cluster, no replacement should occur.
+        if distinct_cnt < endpoints.len() / 2 + 1 {
+            warn!(
+                "distinct endpoints small than majority of meta cluster nodes {}<{}, endpoints: {:?}",
+                distinct_cnt,
+                endpoints.len(),
+                endpoints
+            );
+            return Ok(());
         }
 
         let mut eps = self.endpoints.write().await;
@@ -382,31 +573,101 @@ impl MetaGrpcClient {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn sync_endpoints(&self) -> Result<()> {
-        let endpoints = {
-            let eps = self.endpoints.read().await;
-            (*eps).clone()
-        };
-        let channel = self.conn_pool.get(&endpoints).await?;
-
-        let mut client = MetaServiceClient::new(channel.clone());
-        let endpoints = client
+    pub async fn sync_endpoints(&self) -> std::result::Result<(), MetaError> {
+        let mut client = self.make_client().await?;
+        let result = client
             .member_list(Request::new(MemberListRequest {
                 data: "".to_string(),
             }))
-            .await?;
-        let result: Vec<String> = endpoints.into_inner().data;
+            .await;
+        let endpoints: std::result::Result<MemberListReply, Status> = match result {
+            Ok(r) => Ok(r.into_inner()),
+            Err(s) => {
+                if status_is_retryable(&s) {
+                    self.mark_as_unhealthy().await;
+                    let mut client = self.make_client().await?;
+                    let req = Request::new(MemberListRequest {
+                        data: "".to_string(),
+                    });
+                    Ok(client.member_list(req).await?.into_inner())
+                } else {
+                    Err(s)
+                }
+            }
+        };
+        let result: Vec<String> = endpoints?.data;
         self.set_endpoints(result).await?;
         Ok(())
     }
 
+    async fn auto_sync_endpoints(self: Arc<Self>, mut cancel_tx: OneSend<()>) {
+        if let Some(interval) = self.auto_sync_interval {
+            loop {
+                select! {
+                    _ = cancel_tx.closed() => {
+                        return;
+                    }
+                    _ = sleep(interval) => {
+                        let r = self.sync_endpoints().await;
+                        if let Err(e) = r {
+                            warn!("auto sync endpoints failed: {:?}", e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Handshake with metasrv.
-    #[tracing::instrument(level = "debug", skip(client, password))]
-    async fn handshake(
+    ///
+    /// - Check whether the versions of this client(`C`) and the remote metasrv(`S`) are compatible.
+    /// - Authorize this client.
+    ///
+    /// ## Check compatibility
+    ///
+    /// Both client `C` and  server `S` maintains two semantic-version:
+    /// - `C` maintains the its own semver(`C.ver`) and the minimal compatible `S` semver(`C.min_srv_ver`).
+    /// - `S` maintains the its own semver(`S.ver`) and the minimal compatible `S` semver(`S.min_cli_ver`).
+    ///
+    /// When handshaking:
+    /// - `C` sends its ver `C.ver` to `S`,
+    /// - When `S` receives handshake request, `S` asserts that `C.ver >= S.min_cli_ver`.
+    /// - Then `S` replies handshake-reply with its `S.ver`.
+    /// - When `C` receives the reply, `C` asserts that `S.ver >= C.min_srv_ver`.
+    ///
+    /// Handshake succeeds if both of these two assertions hold.
+    ///
+    /// E.g.:
+    /// - `S: (ver=3, min_cli_ver=1)` is compatible with `C: (ver=3, min_srv_ver=2)`.
+    /// - `S: (ver=4, min_cli_ver=4)` is **NOT** compatible with `C: (ver=3, min_srv_ver=2)`.
+    ///   Because although `S.ver(4) >= C.min_srv_ver(3)` holds,
+    ///   but `C.ver(3) >= S.min_cli_ver(4)` does not hold.
+    ///
+    /// ```text
+    /// C.ver:    1             3      4
+    /// C --------+-------------+------+------------>
+    ///           ^      .------'      ^
+    ///           |      |             |
+    ///           '-------------.      |
+    ///                  |      |      |
+    ///                  v      |      |
+    /// S ---------------+------+------+------------>
+    /// S.ver:           2      3      4
+    /// ```
+    #[tracing::instrument(level = "debug", skip(client, password, client_ver, min_metasrv_ver))]
+    pub async fn handshake(
         client: &mut MetaServiceClient<Channel>,
+        client_ver: &Version,
+        min_metasrv_ver: &Version,
         username: &str,
         password: &str,
     ) -> std::result::Result<Vec<u8>, MetaError> {
+        debug!(
+            client_ver = display(client_ver),
+            min_metasrv_ver = display(min_metasrv_ver),
+            "client version"
+        );
+
         let auth = BasicAuth {
             username: username.to_string(),
             password: password.to_string(),
@@ -414,9 +675,10 @@ impl MetaGrpcClient {
         let mut payload = vec![];
         auth.encode(&mut payload)?;
 
-        let req = Request::new(futures::stream::once(async {
+        let my_ver = to_digit_ver(client_ver);
+        let req = Request::new(futures::stream::once(async move {
             HandshakeRequest {
-                protocol_version: 0,
+                protocol_version: my_ver,
                 payload,
             }
         }));
@@ -424,7 +686,33 @@ impl MetaGrpcClient {
         let rx = client.handshake(req).await?;
         let mut rx = rx.into_inner();
 
-        let resp = rx.next().await.expect("Must respond from handshake")?;
+        let res = rx.next().await.ok_or_else(|| {
+            MetaNetworkError::ConnectionError(ConnectionError::new(
+                AnyError::error("handshake returns nothing"),
+                "",
+            ))
+        })?;
+
+        let resp = res?;
+
+        // backward compatibility: no version in handshake.
+        // TODO(xp): remove this when merged.
+        if resp.protocol_version > 0 {
+            let min_compatible = to_digit_ver(min_metasrv_ver);
+            if resp.protocol_version < min_compatible {
+                return Err(MetaError::MetaNetworkError(
+                    MetaNetworkError::InvalidArgument(InvalidArgument::new(
+                        AnyError::error(format!(
+                            "metasrv protocol_version({}) < meta-client min-compatible({})",
+                            from_digit_ver(resp.protocol_version),
+                            min_metasrv_ver,
+                        )),
+                        "",
+                    )),
+                ));
+            }
+        }
+
         let token = resp.payload;
         Ok(token)
     }
@@ -435,7 +723,7 @@ impl MetaGrpcClient {
         &self,
         watch_request: WatchRequest,
     ) -> std::result::Result<tonic::codec::Streaming<WatchResponse>, MetaError> {
-        tracing::debug!(
+        debug!(
             watch_request = debug(&watch_request),
             "MetaGrpcClient worker: handle watch request"
         );
@@ -451,7 +739,7 @@ impl MetaGrpcClient {
         &self,
         export_request: message::ExportReq,
     ) -> std::result::Result<tonic::codec::Streaming<ExportedChunk>, MetaError> {
-        tracing::debug!(
+        debug!(
             export_request = debug(&export_request),
             "MetaGrpcClient worker: handle export request"
         );
@@ -469,11 +757,11 @@ impl MetaGrpcClient {
     {
         let act: MetaGrpcWriteReq = v.into();
 
-        tracing::debug!(req = debug(&act), "MetaGrpcClient::do_write request");
+        debug!(req = debug(&act), "MetaGrpcClient::do_write request");
 
         let req: Request<RaftRequest> = act.clone().try_into()?;
 
-        tracing::debug!(
+        debug!(
             req = debug(&req),
             "MetaGrpcClient::do_write serialized request"
         );
@@ -486,10 +774,7 @@ impl MetaGrpcClient {
             Ok(r) => Ok(r.into_inner()),
             Err(s) => {
                 if status_is_retryable(&s) {
-                    {
-                        let mut token = self.token.write().await;
-                        *token = None;
-                    }
+                    self.mark_as_unhealthy().await;
                     let mut client = self.make_client().await?;
                     let req: Request<RaftRequest> = act.try_into()?;
                     let req = common_tracing::inject_span_to_tonic_request(req);
@@ -516,11 +801,11 @@ impl MetaGrpcClient {
     {
         let act: MetaGrpcReadReq = v.into();
 
-        tracing::debug!(req = debug(&act), "MetaGrpcClient::do_read request");
+        debug!(req = debug(&act), "MetaGrpcClient::do_read request");
 
         let req: Request<RaftRequest> = act.clone().try_into()?;
 
-        tracing::debug!(
+        debug!(
             req = debug(&req),
             "MetaGrpcClient::do_read serialized request"
         );
@@ -530,16 +815,13 @@ impl MetaGrpcClient {
         let mut client = self.make_client().await?;
         let result = client.read_msg(req).await;
 
-        tracing::debug!(reply = debug(&result), "MetaGrpcClient::do_read reply");
+        debug!(reply = debug(&result), "MetaGrpcClient::do_read reply");
 
         let rpc_res: std::result::Result<RaftReply, Status> = match result {
             Ok(r) => Ok(r.into_inner()),
             Err(s) => {
                 if status_is_retryable(&s) {
-                    {
-                        let mut token = self.token.write().await;
-                        *token = None;
-                    }
+                    self.mark_as_unhealthy().await;
                     let mut client = self.make_client().await?;
                     let req: Request<RaftRequest> = act.try_into()?;
                     let req = common_tracing::inject_span_to_tonic_request(req);
@@ -562,7 +844,7 @@ impl MetaGrpcClient {
     ) -> std::result::Result<TxnReply, MetaError> {
         let txn: TxnRequest = req;
 
-        tracing::debug!(req = display(&txn), "MetaGrpcClient::transaction request");
+        debug!(req = display(&txn), "MetaGrpcClient::transaction request");
 
         let req: Request<TxnRequest> = Request::new(txn.clone());
         let req = common_tracing::inject_span_to_tonic_request(req);
@@ -574,10 +856,7 @@ impl MetaGrpcClient {
             Ok(r) => return Ok(r.into_inner()),
             Err(s) => {
                 if status_is_retryable(&s) {
-                    {
-                        let mut token = self.token.write().await;
-                        *token = None;
-                    }
+                    self.mark_as_unhealthy().await;
                     let mut client = self.make_client().await?;
                     let req: Request<TxnRequest> = Request::new(txn);
                     let req = common_tracing::inject_span_to_tonic_request(req);
@@ -591,14 +870,22 @@ impl MetaGrpcClient {
 
         let reply = result?;
 
-        tracing::debug!(reply = display(&reply), "MetaGrpcClient::transaction reply");
+        debug!(reply = display(&reply), "MetaGrpcClient::transaction reply");
 
         Ok(reply)
+    }
+    async fn mark_as_unhealthy(&self) {
+        let ca = self.current_endpoint.lock();
+        let mut ue = self.unhealthy_endpoints.lock();
+        ue.insert((*ca).as_ref().unwrap().clone(), ());
     }
 }
 
 fn status_is_retryable(status: &Status) -> bool {
-    matches!(status.code(), Code::Unauthenticated | Code::Internal)
+    matches!(
+        status.code(),
+        Code::Unauthenticated | Code::Unavailable | Code::Internal
+    )
 }
 
 #[derive(Clone)]

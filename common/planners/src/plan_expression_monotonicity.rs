@@ -119,7 +119,7 @@ impl ExpressionMonotonicityVisitor {
                     return Err(ErrorCode::LogicalError(format!(
                         "Expected {} arguments, actual {}.",
                         args_size, index
-                    )))
+                    )));
                 }
                 Some((arg_type, monotonic)) => {
                     left_vec.push(monotonic.left.clone());
@@ -225,7 +225,7 @@ impl ExpressionVisitor for ExpressionMonotonicityVisitor {
     fn post_visit(mut self, expr: &Expression) -> Result<Self> {
         match expr {
             Expression::Column(s) => {
-                let (left, right) = self.variables.get(&*s).ok_or_else(|| {
+                let (left, right) = self.variables.get(s).ok_or_else(|| {
                     ErrorCode::BadArguments(format!("Cannot find the column name '{:?}'", *s))
                 })?;
 

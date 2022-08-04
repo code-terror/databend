@@ -32,22 +32,22 @@ async fn test_explain_interpreter() -> Result<()> {
     let executor = InterpreterFactory::get(ctx, plan)?;
     assert_eq!(executor.name(), "ExplainInterpreter");
 
-    let stream = executor.execute(None).await?;
+    let stream = executor.execute().await?;
     let result = stream.try_collect::<Vec<_>>().await?;
     let block = &result[0];
     assert_eq!(block.num_columns(), 1);
     assert_eq!(block.column(0).len(), 4);
 
     let expected = vec![
-            "+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+",
-            "| explain                                                                                                                                                                                                    |",
-            "+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+",
-            "| Projection: number:UInt64                                                                                                                                                                                  |",
-            "|   Having: ((number + 1) = 4)                                                                                                                                                                               |",
-            "|     Filter: ((number + 1) = 4)                                                                                                                                                                             |",
-            "|       ReadDataSource: scan schema: [number:UInt64], statistics: [read_rows: 10, read_bytes: 80, partitions_scanned: 1, partitions_total: 1], push_downs: [projections: [0], filters: [((number + 1) = 4)]] |",
-            "+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+",
-        ];
+        "+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+",
+        "| explain                                                                                                                                                                                                    |",
+        "+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+",
+        "| Projection: number:UInt64                                                                                                                                                                                  |",
+        "|   Having: ((number + 1) = 4)                                                                                                                                                                               |",
+        "|     Filter: ((number + 1) = 4)                                                                                                                                                                             |",
+        "|       ReadDataSource: scan schema: [number:UInt64], statistics: [read_rows: 10, read_bytes: 80, partitions_scanned: 1, partitions_total: 1], push_downs: [projections: [0], filters: [((number + 1) = 4)]] |",
+        "+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+",
+    ];
     common_datablocks::assert_blocks_eq(expected, result.as_slice());
 
     Ok(())

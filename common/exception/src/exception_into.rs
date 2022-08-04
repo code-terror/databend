@@ -88,15 +88,43 @@ impl From<std::num::TryFromIntError> for ErrorCode {
     }
 }
 
-impl From<common_arrow::arrow::error::ArrowError> for ErrorCode {
-    fn from(error: common_arrow::arrow::error::ArrowError) -> Self {
+impl From<common_arrow::arrow::error::Error> for ErrorCode {
+    fn from(error: common_arrow::arrow::error::Error) -> Self {
         ErrorCode::from_std_error(error)
     }
 }
 
-impl From<Box<bincode::ErrorKind>> for ErrorCode {
-    fn from(error: Box<bincode::ErrorKind>) -> Self {
+impl From<bincode::error::EncodeError> for ErrorCode {
+    fn from(error: bincode::error::EncodeError) -> Self {
         ErrorCode::from_std_error(error)
+    }
+}
+
+impl From<bincode::error::DecodeError> for ErrorCode {
+    fn from(error: bincode::error::DecodeError) -> Self {
+        ErrorCode::from_std_error(error)
+    }
+}
+
+impl From<bincode::serde::EncodeError> for ErrorCode {
+    fn from(error: bincode::serde::EncodeError) -> Self {
+        ErrorCode::create(
+            1002,
+            format!("{error:?}"),
+            None,
+            Some(ErrorCodeBacktrace::Origin(Arc::new(Backtrace::capture()))),
+        )
+    }
+}
+
+impl From<bincode::serde::DecodeError> for ErrorCode {
+    fn from(error: bincode::serde::DecodeError) -> Self {
+        ErrorCode::create(
+            1002,
+            format!("{error:?}"),
+            None,
+            Some(ErrorCodeBacktrace::Origin(Arc::new(Backtrace::capture()))),
+        )
     }
 }
 
@@ -159,7 +187,7 @@ impl From<octocrab::Error> for ErrorCode {
 }
 
 // ===  ser/de to/from tonic::Status ===
-#[derive(thiserror::Error, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+#[derive(thiserror::Error, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SerializedError {
     code: u16,
     message: String,

@@ -14,28 +14,25 @@
 
 use std::any::Any;
 use std::fmt::Display;
-use std::future::Future;
 use std::sync::Arc;
 
 use common_datablocks::DataBlock;
 use common_datavalues::prelude::*;
 use common_exception::ErrorCode;
 use common_exception::Result;
-use common_meta_types::TableInfo;
+use common_meta_app::schema::TableInfo;
 use common_planners::Extras;
 use common_planners::Partitions;
 use common_planners::ReadDataSourcePlan;
 use common_planners::Statistics;
-use common_streams::DataBlockStream;
-use common_streams::SendableDataBlockStream;
 
-use crate::pipelines::new::processors::port::OutputPort;
-use crate::pipelines::new::processors::processor::ProcessorPtr;
-use crate::pipelines::new::processors::AsyncSource;
-use crate::pipelines::new::processors::AsyncSourcer;
-use crate::pipelines::new::NewPipe;
-use crate::pipelines::new::NewPipeline;
-use crate::sessions::QueryContext;
+use crate::pipelines::processors::port::OutputPort;
+use crate::pipelines::processors::processor::ProcessorPtr;
+use crate::pipelines::processors::AsyncSource;
+use crate::pipelines::processors::AsyncSourcer;
+use crate::pipelines::Pipe;
+use crate::pipelines::Pipeline;
+use crate::sessions::TableContext;
 use crate::storages::github::RepoCommentsTable;
 use crate::storages::github::RepoInfoTable;
 use crate::storages::github::RepoIssuesTable;
@@ -98,37 +95,22 @@ impl Table for GithubTable {
 
     async fn read_partitions(
         &self,
-        _ctx: Arc<QueryContext>,
+        _ctx: Arc<dyn TableContext>,
         _push_downs: Option<Extras>,
     ) -> Result<(Statistics, Partitions)> {
         Ok((Statistics::default(), vec![]))
     }
 
-    async fn read(
-        &self,
-        _ctx: Arc<QueryContext>,
-        _plan: &ReadDataSourcePlan,
-    ) -> Result<SendableDataBlockStream> {
-        let arrays = get_data_from_github(self.options.clone()).await?;
-        let block = DataBlock::create(self.table_info.schema(), arrays);
-
-        Ok(Box::pin(DataBlockStream::create(
-            self.table_info.schema(),
-            None,
-            vec![block],
-        )))
-    }
-
     fn read2(
         &self,
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         _: &ReadDataSourcePlan,
-        pipeline: &mut NewPipeline,
+        pipeline: &mut Pipeline,
     ) -> Result<()> {
         let output = OutputPort::create();
         let options = self.options.clone();
         let schema = self.table_info.schema();
-        pipeline.add_pipe(NewPipe::SimplePipe {
+        pipeline.add_pipe(Pipe::SimplePipe {
             inputs_port: vec![],
             outputs_port: vec![output.clone()],
             processors: vec![GithubSource::create(ctx, output, schema, options)?],
@@ -174,7 +156,7 @@ struct GithubSource {
 
 impl GithubSource {
     pub fn create(
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         output: Arc<OutputPort>,
         schema: DataSchemaRef,
         options: RepoTableOptions,
@@ -191,17 +173,14 @@ impl GithubSource {
 impl AsyncSource for GithubSource {
     const NAME: &'static str = "GithubSource";
 
-    type BlockFuture<'a> = impl Future<Output = Result<Option<DataBlock>>>;
-
-    fn generate(&mut self) -> Self::BlockFuture<'_> {
-        async {
-            if self.finish {
-                return Ok(None);
-            }
-
-            self.finish = true;
-            let arrays = get_data_from_github(self.options.clone()).await?;
-            Ok(Some(DataBlock::create(self.schema.clone(), arrays)))
+    #[async_trait::unboxed_simple]
+    async fn generate(&mut self) -> Result<Option<DataBlock>> {
+        if self.finish {
+            return Ok(None);
         }
+
+        self.finish = true;
+        let arrays = get_data_from_github(self.options.clone()).await?;
+        Ok(Some(DataBlock::create(self.schema.clone(), arrays)))
     }
 }

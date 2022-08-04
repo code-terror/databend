@@ -17,39 +17,36 @@ use std::sync::Arc;
 use common_exception::Result;
 use common_meta_types::GrantObject;
 use common_meta_types::UserPrivilegeType;
-use common_planners::UnDropTablePlan;
+use common_planners::UndropTablePlan;
 use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
 
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 
-pub struct UnDropTableInterpreter {
+pub struct UndropTableInterpreter {
     ctx: Arc<QueryContext>,
-    plan: UnDropTablePlan,
+    plan: UndropTablePlan,
 }
 
-impl UnDropTableInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, plan: UnDropTablePlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(UnDropTableInterpreter { ctx, plan }))
+impl UndropTableInterpreter {
+    pub fn try_create(ctx: Arc<QueryContext>, plan: UndropTablePlan) -> Result<Self> {
+        Ok(UndropTableInterpreter { ctx, plan })
     }
 }
 
 #[async_trait::async_trait]
-impl Interpreter for UnDropTableInterpreter {
+impl Interpreter for UndropTableInterpreter {
     fn name(&self) -> &str {
         "UndropTableInterpreter"
     }
 
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         let catalog_name = self.plan.catalog.as_str();
-        let db_name = self.plan.db.as_str();
+        let db_name = self.plan.database.as_str();
 
-        // shall we add UserPrivilege::Type::UnDrop ?
+        // shall we add UserPrivilege::Type::Undrop ?
         self.ctx
             .get_current_session()
             .validate_privilege(

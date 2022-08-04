@@ -17,11 +17,12 @@ use std::sync::Arc;
 use common_datablocks::DataBlock;
 use common_datavalues::prelude::*;
 use common_exception::Result;
-use common_meta_types::TableIdent;
-use common_meta_types::TableInfo;
-use common_meta_types::TableMeta;
+use common_meta_app::schema::TableIdent;
+use common_meta_app::schema::TableInfo;
+use common_meta_app::schema::TableMeta;
+use snailquote::escape;
 
-use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 use crate::storages::system::table::SyncOneBlockSystemTable;
 use crate::storages::system::table::SyncSystemTable;
 use crate::storages::Table;
@@ -37,7 +38,7 @@ impl SyncSystemTable for SettingsTable {
         &self.table_info
     }
 
-    fn get_full_data(&self, ctx: Arc<QueryContext>) -> Result<DataBlock> {
+    fn get_full_data(&self, ctx: Arc<dyn TableContext>) -> Result<DataBlock> {
         let settings = ctx.get_settings().get_setting_values();
 
         let mut names: Vec<String> = vec![];
@@ -51,9 +52,9 @@ impl SyncSystemTable for SettingsTable {
                 // Name.
                 names.push(format!("{:?}", vals[0]));
                 // Value.
-                values.push(format!("{:?}", vals[1]));
+                values.push(escape(format!("{:?}", vals[1]).as_str()).to_string());
                 // Default Value.
-                defaults.push(format!("{:?}", vals[2]));
+                defaults.push(escape(format!("{:?}", vals[2]).as_str()).to_string());
                 // Scope level.
                 levels.push(format!("{:?}", vals[3]));
                 // Desc.

@@ -11,40 +11,51 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-//
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use common_datablocks::assert_blocks_sorted_eq_with_name;
 use common_datablocks::DataBlock;
 use common_datavalues::prelude::*;
 use common_exception::Result;
-use common_io::prelude::StorageFsConfig;
-use common_io::prelude::StorageParams;
-use common_meta_types::DatabaseMeta;
-use common_meta_types::TableMeta;
-use common_planners::col;
+use common_meta_app::schema::DatabaseMeta;
+use common_meta_app::schema::TableMeta;
+use common_pipeline::processors::port::OutputPort;
+use common_pipeline::Pipeline;
+use common_pipeline::SourcePipeBuilder;
 use common_planners::CreateDatabasePlan;
 use common_planners::CreateTablePlan;
 use common_planners::Expression;
 use common_planners::Extras;
+use common_storage::StorageFsConfig;
+use common_storage::StorageParams;
 use common_streams::SendableDataBlockStream;
 use databend_query::catalogs::CATALOG_DEFAULT;
+use databend_query::interpreters::append2table;
+use databend_query::interpreters::commit2table;
 use databend_query::interpreters::CreateTableInterpreter;
-use databend_query::interpreters::InterpreterFactory;
+use databend_query::interpreters::Interpreter;
+use databend_query::interpreters::InterpreterFactoryV2;
+use databend_query::pipelines::processors::BlocksSource;
 use databend_query::sessions::QueryContext;
-use databend_query::sql::PlanParser;
+use databend_query::sessions::TableContext;
+use databend_query::sql::Planner;
 use databend_query::sql::OPT_KEY_DATABASE_ID;
 use databend_query::storages::fuse::table_functions::ClusteringInformationTable;
 use databend_query::storages::fuse::table_functions::FuseSnapshotTable;
+use databend_query::storages::fuse::FUSE_TBL_BLOCK_INDEX_PREFIX;
 use databend_query::storages::fuse::FUSE_TBL_BLOCK_PREFIX;
 use databend_query::storages::fuse::FUSE_TBL_SEGMENT_PREFIX;
 use databend_query::storages::fuse::FUSE_TBL_SNAPSHOT_PREFIX;
 use databend_query::storages::Table;
+use databend_query::storages::TableStreamReadWrap;
 use databend_query::storages::ToReadDataSourcePlan;
 use databend_query::table_functions::TableArgs;
 use futures::TryStreamExt;
+use parking_lot::Mutex;
 use tempfile::TempDir;
+use tokio_stream::StreamExt;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -70,14 +81,14 @@ impl TestFixture {
             .unwrap();
 
         let tenant = ctx.get_tenant();
-        let random_prefix: String = Uuid::new_v4().to_simple().to_string();
+        let random_prefix: String = Uuid::new_v4().simple().to_string();
         // prepare a randomly named default database
         let db_name = gen_db_name(&random_prefix);
         let plan = CreateDatabasePlan {
             catalog: "default".to_owned(),
             tenant,
             if_not_exists: false,
-            db: db_name,
+            database: db_name,
             meta: DatabaseMeta {
                 engine: "".to_string(),
                 ..Default::default()
@@ -117,7 +128,13 @@ impl TestFixture {
     }
 
     pub fn default_schema() -> DataSchemaRef {
-        DataSchemaRefExt::create(vec![DataField::new("id", i32::to_data_type())])
+        let tuple_inner_names = vec!["a".to_string(), "b".to_string()];
+        let tuple_inner_data_types = vec![i32::to_data_type(), i32::to_data_type()];
+        let tuple_data_type = StructType::new_impl(Some(tuple_inner_names), tuple_inner_data_types);
+        DataSchemaRefExt::create(vec![
+            DataField::new("id", i32::to_data_type()),
+            DataField::new("t", tuple_data_type),
+        ])
     }
 
     pub fn default_crate_table_plan(&self) -> CreateTablePlan {
@@ -125,7 +142,7 @@ impl TestFixture {
             if_not_exists: false,
             tenant: self.default_tenant(),
             catalog: self.default_catalog_name(),
-            db: self.default_db_name(),
+            database: self.default_db_name(),
             table: self.default_table_name(),
             table_meta: TableMeta {
                 schema: TestFixture::default_schema(),
@@ -135,18 +152,20 @@ impl TestFixture {
                     (OPT_KEY_DATABASE_ID.to_owned(), "1".to_owned()),
                 ]
                 .into(),
-                order_keys: Some("(id)".to_string()),
+                default_cluster_key: Some("(id)".to_string()),
+                cluster_keys: vec!["(id)".to_string()],
+                default_cluster_key_id: Some(0),
                 ..Default::default()
             },
             as_select: None,
-            order_keys: vec![col("id")],
+            cluster_keys: vec!["id".to_string()],
         }
     }
 
     pub async fn create_default_table(&self) -> Result<()> {
         let create_table_plan = self.default_crate_table_plan();
         let interpreter = CreateTableInterpreter::try_create(self.ctx.clone(), create_table_plan)?;
-        interpreter.execute(None).await?;
+        interpreter.execute().await?;
         Ok(())
     }
 
@@ -162,13 +181,34 @@ impl TestFixture {
         (0..num_of_block)
             .into_iter()
             .map(|idx| {
-                let schema =
-                    DataSchemaRefExt::create(vec![DataField::new("a", i32::to_data_type())]);
-                Ok(DataBlock::create(schema, vec![Series::from_data(
+                let tuple_inner_names = vec!["a".to_string(), "b".to_string()];
+                let tuple_inner_data_types = vec![i32::to_data_type(), i32::to_data_type()];
+                let tuple_data_type =
+                    StructType::new_impl(Some(tuple_inner_names), tuple_inner_data_types);
+                let schema = DataSchemaRefExt::create(vec![
+                    DataField::new("id", i32::to_data_type()),
+                    DataField::new("t", tuple_data_type.clone()),
+                ]);
+                let column0 = Series::from_data(
                     std::iter::repeat_with(|| idx as i32 + start)
                         .take(rows_perf_block)
                         .collect::<Vec<i32>>(),
-                )]))
+                );
+                let column1 = Series::from_data(
+                    std::iter::repeat_with(|| (idx as i32 + start) * 2)
+                        .take(rows_perf_block)
+                        .collect::<Vec<i32>>(),
+                );
+                let column2 = Series::from_data(
+                    std::iter::repeat_with(|| (idx as i32 + start) * 3)
+                        .take(rows_perf_block)
+                        .collect::<Vec<i32>>(),
+                );
+                let tuple_inner_columns = vec![column1, column2];
+                let tuple_column =
+                    StructColumn::from_data(tuple_inner_columns, tuple_data_type).arc();
+
+                Ok(DataBlock::create(schema, vec![column0, tuple_column]))
             })
             .collect()
     }
@@ -197,16 +237,44 @@ impl TestFixture {
             )
             .await
     }
+
+    /// append_commit_blocks with single thread
+    pub async fn append_commit_blocks(
+        &self,
+        table: Arc<dyn Table>,
+        blocks: Vec<DataBlock>,
+        overwrite: bool,
+        commit: bool,
+    ) -> Result<()> {
+        let source_schema = blocks
+            .get(0)
+            .map(|b| b.schema().clone())
+            .unwrap_or_else(|| table.schema());
+        let mut pipeline = Pipeline::create();
+        let mut builder = SourcePipeBuilder::create();
+
+        let blocks = Arc::new(Mutex::new(VecDeque::from_iter(blocks)));
+        let output = OutputPort::create();
+        builder.add_source(
+            output.clone(),
+            BlocksSource::create(self.ctx.clone(), output.clone(), blocks.clone())?,
+        );
+        pipeline.add_pipe(builder.finalize());
+
+        append2table(self.ctx.clone(), table.clone(), source_schema, pipeline)?;
+
+        if commit {
+            commit2table(self.ctx.clone(), table.clone(), overwrite).await?;
+        }
+        Ok(())
+    }
 }
 
 fn gen_db_name(prefix: &str) -> String {
     format!("db_{}", prefix)
 }
 
-pub async fn test_drive(
-    test_db: Option<&str>,
-    test_tbl: Option<&str>,
-) -> Result<SendableDataBlockStream> {
+pub async fn test_drive(test_db: Option<&str>, test_tbl: Option<&str>) -> Result<()> {
     let arg_db = match test_db {
         Some(v) => DataValue::String(v.as_bytes().to_vec()),
         None => DataValue::Null,
@@ -221,12 +289,21 @@ pub async fn test_drive(
         Expression::create_literal(arg_db),
         Expression::create_literal(arg_tbl),
     ]);
+
     test_drive_with_args(tbl_args).await
 }
 
-pub async fn test_drive_with_args(tbl_args: TableArgs) -> Result<SendableDataBlockStream> {
+pub async fn test_drive_with_args(tbl_args: TableArgs) -> Result<()> {
     let ctx = crate::tests::create_query_context().await?;
-    test_drive_with_args_and_ctx(tbl_args, ctx).await
+    let mut stream = test_drive_with_args_and_ctx(tbl_args, ctx).await?;
+
+    while let Some(res) = stream.next().await {
+        if let Err(cause) = res {
+            return Err(cause);
+        }
+    }
+
+    Ok(())
 }
 
 pub async fn test_drive_with_args_and_ctx(
@@ -240,7 +317,7 @@ pub async fn test_drive_with_args_and_ctx(
         .read_plan(ctx.clone(), Some(Extras::default()))
         .await?;
     ctx.try_set_partitions(source_plan.parts.clone())?;
-    func.read(ctx, &source_plan).await
+    func.as_table().read(ctx, &source_plan).await
 }
 
 pub async fn test_drive_clustering_information(
@@ -254,7 +331,7 @@ pub async fn test_drive_clustering_information(
         .read_plan(ctx.clone(), Some(Extras::default()))
         .await?;
     ctx.try_set_partitions(source_plan.parts.clone())?;
-    func.read(ctx, &source_plan).await
+    func.as_table().read(ctx, &source_plan).await
 }
 
 pub fn expects_err<T>(case_name: &str, err_code: u16, res: Result<T>) {
@@ -281,7 +358,7 @@ pub async fn expects_ok(
 ) -> Result<()> {
     match res {
         Ok(stream) => {
-            let blocks: Vec<DataBlock> = stream.try_collect().await.unwrap();
+            let blocks: Vec<DataBlock> = stream.try_collect().await?;
             assert_blocks_sorted_eq_with_name(case_name.as_ref(), expected, &blocks)
         }
         Err(err) => {
@@ -296,10 +373,10 @@ pub async fn expects_ok(
 }
 
 pub async fn execute_query(ctx: Arc<QueryContext>, query: &str) -> Result<SendableDataBlockStream> {
-    let plan = PlanParser::parse(ctx.clone(), query).await?;
-    InterpreterFactory::get(ctx.clone(), plan)?
-        .execute(None)
-        .await
+    let mut planner = Planner::new(ctx.clone());
+    let (plan, _, _) = planner.plan_sql(query).await?;
+    let executor = InterpreterFactoryV2::get(ctx.clone(), &plan)?;
+    executor.execute().await
 }
 
 pub async fn execute_command(ctx: Arc<QueryContext>, query: &str) -> Result<()> {
@@ -319,10 +396,10 @@ pub async fn append_sample_data_overwrite(
 ) -> Result<()> {
     let stream = TestFixture::gen_sample_blocks_stream(num_blocks, 1);
     let table = fixture.latest_default_table().await?;
-    let ctx = fixture.ctx();
-    let stream = table.append_data(ctx.clone(), stream).await?;
-    table
-        .commit_insertion(ctx, CATALOG_DEFAULT, stream.try_collect().await?, overwrite)
+
+    let blocks = stream.try_collect().await?;
+    fixture
+        .append_commit_blocks(table.clone(), blocks, overwrite, true)
         .await
 }
 
@@ -332,6 +409,7 @@ pub async fn check_data_dir(
     snapshot_count: u32,
     segment_count: u32,
     block_count: u32,
+    index_count: u32,
 ) {
     let data_path = match fixture.ctx().get_config().storage.params {
         StorageParams::Fs(v) => v.root,
@@ -341,10 +419,11 @@ pub async fn check_data_dir(
     let mut ss_count = 0;
     let mut sg_count = 0;
     let mut b_count = 0;
-    // avoid ugly line wrapping
+    let mut i_count = 0;
     let prefix_snapshot = FUSE_TBL_SNAPSHOT_PREFIX;
     let prefix_segment = FUSE_TBL_SEGMENT_PREFIX;
     let prefix_block = FUSE_TBL_BLOCK_PREFIX;
+    let prefix_index = FUSE_TBL_BLOCK_INDEX_PREFIX;
     for entry in WalkDir::new(root) {
         let entry = entry.unwrap();
         if entry.file_type().is_file() {
@@ -355,6 +434,8 @@ pub async fn check_data_dir(
                 sg_count += 1;
             } else if entry.path().to_str().unwrap().contains(prefix_block) {
                 b_count += 1;
+            } else if entry.path().to_str().unwrap().contains(prefix_index) {
+                i_count += 1;
             }
         }
     }
@@ -373,6 +454,12 @@ pub async fn check_data_dir(
     assert_eq!(
         b_count, block_count,
         "case [{}], check block count",
+        case_name
+    );
+
+    assert_eq!(
+        i_count, index_count,
+        "case [{}], check index count",
         case_name
     );
 }

@@ -23,9 +23,12 @@ use common_meta_types::PasswordHashMethod;
 use common_meta_types::UserInfo;
 use common_meta_types::UserPrivilegeSet;
 use databend_query::clusters::Cluster;
+use databend_query::clusters::ClusterHelper;
 use databend_query::sessions::QueryContext;
 use databend_query::sessions::QueryContextShared;
+use databend_query::sessions::SessionManager;
 use databend_query::sessions::SessionType;
+use databend_query::sessions::TableContext;
 use databend_query::storages::StorageContext;
 use databend_query::Config;
 
@@ -33,6 +36,12 @@ use crate::tests::SessionManagerBuilder;
 
 pub async fn create_query_context() -> Result<Arc<QueryContext>> {
     let sessions = SessionManagerBuilder::create().build()?;
+    create_query_context_with_session(sessions).await
+}
+
+pub async fn create_query_context_with_session(
+    sessions: Arc<SessionManager>,
+) -> Result<Arc<QueryContext>> {
     let dummy_session = sessions.create_session(SessionType::Dummy).await?;
 
     // Set user with all privileges
@@ -83,8 +92,8 @@ pub async fn create_query_context_with_config(
     Ok(context)
 }
 
-pub fn create_storage_context() -> Result<StorageContext> {
-    let meta_embedded = futures::executor::block_on(MetaEmbedded::new_temp()).unwrap();
+pub async fn create_storage_context() -> Result<StorageContext> {
+    let meta_embedded = MetaEmbedded::new_temp().await.unwrap();
 
     Ok(StorageContext {
         meta: Arc::new(meta_embedded),

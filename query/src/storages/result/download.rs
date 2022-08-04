@@ -16,14 +16,17 @@ use std::sync::Arc;
 
 use async_stream::stream;
 use common_exception::Result;
+use common_formats::output_format::OutputFormatType;
+use common_planners::Extras;
 use common_planners::ReadDataSourcePlan;
 use common_planners::SourceInfo;
 use futures::StreamExt;
 
-use crate::formats::output_format::OutputFormatType;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 use crate::storages::result::ResultTable;
 use crate::storages::Table;
+use crate::storages::TableStreamReadWrap;
 
 pub type SendableVu8Stream =
     std::pin::Pin<Box<dyn futures::stream::Stream<Item = Result<Vec<u8>>> + Send>>;
@@ -33,8 +36,19 @@ impl ResultTable {
         &self,
         ctx: Arc<QueryContext>,
         fmt: OutputFormatType,
+        limit: Option<usize>,
     ) -> Result<SendableVu8Stream> {
-        let (_, parts) = self.read_partitions(ctx.clone(), None).await?;
+        let push_downs = match limit {
+            Some(limit) if limit > 0 => Some(Extras {
+                limit: Some(limit),
+                ..Extras::default()
+            }),
+            _ => None,
+        };
+
+        let (_, parts) = self
+            .read_partitions(ctx.clone(), push_downs.clone())
+            .await?;
         ctx.try_set_partitions(parts)?;
         let mut block_stream = self
             .read(ctx.clone(), &ReadDataSourcePlan {
@@ -45,17 +59,19 @@ impl ResultTable {
                 statistics: Default::default(),
                 description: "".to_string(),
                 tbl_args: None,
-                push_downs: None,
+                push_downs,
             })
             .await?;
         let fmt_setting = ctx.get_format_settings()?;
-        let mut output_format = fmt.create_format(self.schema());
+        let mut output_format = fmt.create_format(self.schema(), fmt_setting);
 
+        let prefix = Ok(output_format.serialize_prefix()?);
         let stream = stream! {
+            yield prefix;
             while let Some(block) = block_stream.next().await {
                 match block{
                     Ok(block) => {
-                        yield output_format.serialize_block(&block, &fmt_setting);
+                        yield output_format.serialize_block(&block);
                     },
                     Err(err) => yield(Err(err)),
                 };

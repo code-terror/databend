@@ -21,12 +21,11 @@ use common_meta_types::UserPrivilegeSet;
 use common_planners::GrantPrivilegePlan;
 use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
-use common_tracing::tracing;
 
 use crate::interpreters::interpreter_common::validate_grant_object_exists;
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 
 #[derive(Debug)]
 pub struct GrantPrivilegeInterpreter {
@@ -35,8 +34,8 @@ pub struct GrantPrivilegeInterpreter {
 }
 
 impl GrantPrivilegeInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, plan: GrantPrivilegePlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(GrantPrivilegeInterpreter { ctx, plan }))
+    pub fn try_create(ctx: Arc<QueryContext>, plan: GrantPrivilegePlan) -> Result<Self> {
+        Ok(GrantPrivilegeInterpreter { ctx, plan })
     }
 }
 
@@ -46,11 +45,8 @@ impl Interpreter for GrantPrivilegeInterpreter {
         "GrantPrivilegeInterpreter"
     }
 
-    #[tracing::instrument(level = "debug", skip(self, _input_stream), fields(ctx.id = self.ctx.get_id().as_str()))]
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    #[tracing::instrument(level = "debug", skip(self), fields(ctx.id = self.ctx.get_id().as_str()))]
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         let plan = self.plan.clone();
 
         validate_grant_privileges(&plan.on, plan.priv_types)?;
@@ -91,7 +87,9 @@ pub fn validate_grant_privileges(object: &GrantObject, privileges: UserPrivilege
         .iter()
         .all(|p| available_privileges.has_privilege(p));
     if !ok {
-        return Err(common_exception::ErrorCode::IllegalGrant("Illegal GRANT/REVOKE command; please consult the manual to see which privileges can be used"));
+        return Err(common_exception::ErrorCode::IllegalGrant(
+            "Illegal GRANT/REVOKE command; please consult the manual to see which privileges can be used",
+        ));
     }
     Ok(())
 }

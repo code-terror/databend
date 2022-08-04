@@ -22,8 +22,8 @@ use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
 
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 
 pub struct DropDatabaseInterpreter {
     ctx: Arc<QueryContext>,
@@ -31,8 +31,8 @@ pub struct DropDatabaseInterpreter {
 }
 
 impl DropDatabaseInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, plan: DropDatabasePlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(DropDatabaseInterpreter { ctx, plan }))
+    pub fn try_create(ctx: Arc<QueryContext>, plan: DropDatabasePlan) -> Result<Self> {
+        Ok(DropDatabaseInterpreter { ctx, plan })
     }
 }
 
@@ -42,10 +42,7 @@ impl Interpreter for DropDatabaseInterpreter {
         "DropDatabaseInterpreter"
     }
 
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         self.ctx
             .get_current_session()
             .validate_privilege(&GrantObject::Global, UserPrivilegeType::Drop)

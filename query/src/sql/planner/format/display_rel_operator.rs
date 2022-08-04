@@ -15,17 +15,21 @@
 use std::fmt::Display;
 
 use common_datavalues::format_data_type_sql;
+use common_functions::scalars::FunctionFactory;
+use itertools::Itertools;
 
 use super::FormatTreeNode;
 use crate::sql::optimizer::SExpr;
-use crate::sql::plans::AggregatePlan;
+use crate::sql::plans::Aggregate;
+use crate::sql::plans::AggregateMode;
 use crate::sql::plans::AndExpr;
 use crate::sql::plans::ComparisonExpr;
 use crate::sql::plans::ComparisonOp;
-use crate::sql::plans::CrossApply;
 use crate::sql::plans::EvalScalar;
-use crate::sql::plans::FilterPlan;
-use crate::sql::plans::LimitPlan;
+use crate::sql::plans::Exchange;
+use crate::sql::plans::Filter;
+use crate::sql::plans::JoinType;
+use crate::sql::plans::Limit;
 use crate::sql::plans::LogicalGet;
 use crate::sql::plans::LogicalInnerJoin;
 use crate::sql::plans::PhysicalHashJoin;
@@ -33,8 +37,9 @@ use crate::sql::plans::PhysicalScan;
 use crate::sql::plans::Project;
 use crate::sql::plans::RelOperator;
 use crate::sql::plans::Scalar;
-use crate::sql::plans::SortPlan;
+use crate::sql::plans::Sort;
 use crate::sql::MetadataRef;
+use crate::sql::ScalarExpr;
 
 pub struct FormatContext {
     metadata: MetadataRef,
@@ -72,7 +77,7 @@ impl Display for FormatContext {
             RelOperator::Aggregate(op) => format_aggregate(f, &self.metadata, op),
             RelOperator::Sort(op) => format_sort(f, &self.metadata, op),
             RelOperator::Limit(op) => format_limit(f, &self.metadata, op),
-            RelOperator::CrossApply(op) => format_cross_apply(f, &self.metadata, op),
+            RelOperator::Exchange(op) => format_exchange(f, &self.metadata, op),
             RelOperator::Pattern(_) => write!(f, "Pattern"),
         }
     }
@@ -80,15 +85,27 @@ impl Display for FormatContext {
 
 pub fn format_scalar(metadata: &MetadataRef, scalar: &Scalar) -> String {
     match scalar {
-        Scalar::BoundColumnRef(column_ref) => column_ref.column.column_name.clone(),
+        Scalar::BoundColumnRef(column_ref) => {
+            if let Some(table_name) = &column_ref.column.table_name {
+                format!(
+                    "{}.{} (#{})",
+                    table_name, column_ref.column.column_name, column_ref.column.index
+                )
+            } else {
+                format!(
+                    "{} (#{})",
+                    column_ref.column.column_name, column_ref.column.index
+                )
+            }
+        }
         Scalar::ConstantExpr(constant) => constant.value.to_string(),
         Scalar::AndExpr(and) => format!(
-            "{} AND {}",
+            "({}) AND ({})",
             format_scalar(metadata, &and.left),
             format_scalar(metadata, &and.right)
         ),
         Scalar::OrExpr(or) => format!(
-            "{} OR {}",
+            "({}) OR ({})",
             format_scalar(metadata, &or.left),
             format_scalar(metadata, &or.right)
         ),
@@ -110,7 +127,7 @@ pub fn format_scalar(metadata: &MetadataRef, scalar: &Scalar) -> String {
                     .join(", ")
             )
         }
-        Scalar::Cast(cast) => {
+        Scalar::CastExpr(cast) => {
             format!(
                 "CAST({} AS {})",
                 format_scalar(metadata, &cast.argument),
@@ -144,18 +161,26 @@ pub fn format_logical_inner_join(
         .iter()
         .zip(op.right_conditions.iter())
         .map(|(left, right)| {
+            let func = FunctionFactory::instance()
+                .get("=", &[&left.data_type(), &right.data_type()])
+                .unwrap();
             ComparisonExpr {
                 op: ComparisonOp::Equal,
                 left: Box::new(left.clone()),
                 right: Box::new(right.clone()),
+                return_type: Box::new(func.return_type()),
             }
             .into()
         })
         .collect();
     let pred: Scalar = preds.iter().fold(preds[0].clone(), |prev, next| {
+        let func = FunctionFactory::instance()
+            .get("and", &[&prev.data_type(), &next.data_type()])
+            .unwrap();
         Scalar::AndExpr(AndExpr {
             left: Box::new(prev),
             right: Box::new(next.clone()),
+            return_type: Box::new(func.return_type()),
         })
     });
     write!(f, "LogicalInnerJoin: {}", format_scalar(metadata, &pred))
@@ -178,11 +203,24 @@ pub fn format_hash_join(
         .map(|scalar| format_scalar(metadata, scalar))
         .collect::<Vec<String>>()
         .join(", ");
-    write!(
-        f,
-        "PhysicalHashJoin: build keys: [{}], probe keys: [{}]",
-        build_keys, probe_keys
-    )
+    let join_filters = op
+        .other_conditions
+        .iter()
+        .map(|scalar| format_scalar(metadata, scalar))
+        .collect::<Vec<String>>()
+        .join(", ");
+    match op.join_type {
+        JoinType::Cross => {
+            write!(f, "CrossJoin")
+        }
+        _ => {
+            write!(
+                f,
+                "HashJoin: {}, build keys: [{}], probe keys: [{}], join filters: [{}]",
+                &op.join_type, build_keys, probe_keys, join_filters,
+            )
+        }
+    }
 }
 
 pub fn format_physical_scan(
@@ -193,17 +231,31 @@ pub fn format_physical_scan(
     let table = metadata.read().table(op.table_index).clone();
     write!(
         f,
-        "PhysicalScan: {}.{}.{}",
+        "Scan: {}.{}.{}",
         &table.catalog, &table.database, &table.name
     )
 }
 
 pub fn format_project(
     f: &mut std::fmt::Formatter<'_>,
-    _metadata: &MetadataRef,
-    _op: &Project,
+    metadata: &MetadataRef,
+    op: &Project,
 ) -> std::fmt::Result {
-    write!(f, "Project")
+    let column_names = metadata
+        .read()
+        .columns()
+        .iter()
+        .map(|entry| format!("{} (#{})", entry.name.clone(), entry.column_index))
+        .collect::<Vec<String>>();
+    // Sorted by column index to make display of Project stable
+    let project_columns = op
+        .columns
+        .iter()
+        .sorted()
+        .map(|idx| column_names[*idx].clone())
+        .collect::<Vec<String>>()
+        .join(",");
+    write!(f, "Project: [{}]", project_columns)
 }
 
 pub fn format_eval_scalar(
@@ -223,7 +275,7 @@ pub fn format_eval_scalar(
 pub fn format_filter(
     f: &mut std::fmt::Formatter<'_>,
     metadata: &MetadataRef,
-    op: &FilterPlan,
+    op: &Filter,
 ) -> std::fmt::Result {
     let scalars = op
         .predicates
@@ -237,7 +289,7 @@ pub fn format_filter(
 pub fn format_aggregate(
     f: &mut std::fmt::Formatter<'_>,
     metadata: &MetadataRef,
-    op: &AggregatePlan,
+    op: &Aggregate,
 ) -> std::fmt::Result {
     let group_items = op
         .group_items
@@ -253,15 +305,21 @@ pub fn format_aggregate(
         .join(", ");
     write!(
         f,
-        "Aggregate: group items: [{}], aggregate functions: [{}]",
-        group_items, agg_funcs
+        "Aggregate({}): group items: [{}], aggregate functions: [{}]",
+        match &op.mode {
+            AggregateMode::Partial => "Partial",
+            AggregateMode::Final => "Final",
+            AggregateMode::Initial => "Initial",
+        },
+        group_items,
+        agg_funcs
     )
 }
 
 pub fn format_sort(
     f: &mut std::fmt::Formatter<'_>,
     metadata: &MetadataRef,
-    op: &SortPlan,
+    op: &Sort,
 ) -> std::fmt::Result {
     let scalars = op
         .items
@@ -269,13 +327,10 @@ pub fn format_sort(
         .map(|item| {
             let name = metadata.read().column(item.index).name.clone();
             format!(
-                "{} {}",
+                "{} (#{}) {}",
                 name,
-                if item.asc.unwrap_or(false) {
-                    "ASC"
-                } else {
-                    "DESC"
-                }
+                item.index,
+                if item.asc { "ASC" } else { "DESC" }
             )
         })
         .collect::<Vec<String>>()
@@ -286,15 +341,33 @@ pub fn format_sort(
 pub fn format_limit(
     f: &mut std::fmt::Formatter<'_>,
     _metadata: &MetadataRef,
-    _op: &LimitPlan,
+    op: &Limit,
 ) -> std::fmt::Result {
-    write!(f, "Limit")
+    let limit = if let Some(val) = op.limit { val } else { 0 };
+    write!(f, "Limit: [{}], Offset: [{}]", limit, op.offset)
 }
 
-pub fn format_cross_apply(
+pub fn format_exchange(
     f: &mut std::fmt::Formatter<'_>,
-    _metadata: &MetadataRef,
-    _op: &CrossApply,
+    metadata: &MetadataRef,
+    op: &Exchange,
 ) -> std::fmt::Result {
-    write!(f, "CrossApply")
+    match op {
+        Exchange::Hash(keys) => {
+            write!(
+                f,
+                "Exchange(Hash): keys: [{}]",
+                keys.iter()
+                    .map(|scalar| format_scalar(metadata, scalar))
+                    .collect::<Vec<String>>()
+                    .join(", ")
+            )
+        }
+        Exchange::Broadcast => {
+            write!(f, "Exchange(Broadcast)")
+        }
+        Exchange::Merge => {
+            write!(f, "Exchange(Merge)")
+        }
+    }
 }

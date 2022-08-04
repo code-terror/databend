@@ -30,36 +30,47 @@ where R: BufferRead
 {
     fn read_int_text<T: FromLexical>(&mut self) -> Result<T> {
         // TODO: reuse the buf
-        let mut buf = vec![];
+        let mut buf = Vec::with_capacity(8);
         let mut has_point = false;
         let mut has_number = false;
         'L: loop {
             let buffer = self.fill_buf()?;
+
             if buffer.is_empty() {
                 break;
             }
 
-            match buffer[0] {
-                b'-' | b'+' => {
-                    if has_number {
-                        break;
+            for index in 0..buffer.len() {
+                match buffer[index] {
+                    b'-' | b'+' => {
+                        if has_number {
+                            buf.extend_from_slice(&buffer[..index]);
+                            self.consume(index);
+                            break 'L;
+                        }
+                    }
+
+                    b'0'..=b'9' => {
+                        has_number = true;
+                    }
+
+                    b'.' => {
+                        has_point = true;
+                        buf.extend_from_slice(&buffer[..index]);
+                        self.consume(index + 1);
+                        break 'L;
+                    }
+                    _ => {
+                        buf.extend_from_slice(&buffer[..index]);
+                        self.consume(index);
+                        break 'L;
                     }
                 }
-
-                b'0'..=b'9' => {
-                    has_number = true;
-                }
-
-                b'.' => {
-                    has_point = true;
-                    self.consume(1);
-                    break;
-                }
-                _ => break 'L,
             }
 
-            buf.push(buffer[0]);
-            self.consume(1);
+            let len = buffer.len();
+            buf.extend_from_slice(buffer);
+            self.consume(len);
         }
 
         if has_point {
@@ -114,6 +125,17 @@ where R: BufferRead
 
         if has_point {
             buf.push(b'.');
+            let _ = self.keep_read(&mut buf, |f| (b'0'..=b'9').contains(&f))?;
+        }
+
+        // #[regex(r"([0-9]*\.[0-9]+(e[+-]?[0-9]+)?)|([0-9]+\.[0-9]*(e[+-]?[0-9]+)?)")]
+        if self.ignore_byte(b'e')? {
+            buf.push(b'e');
+            if self.ignore_byte(b'+')? {
+                buf.push(b'+');
+            } else if self.ignore_byte(b'-')? {
+                buf.push(b'-');
+            }
             let _ = self.keep_read(&mut buf, |f| (b'0'..=b'9').contains(&f))?;
         }
 

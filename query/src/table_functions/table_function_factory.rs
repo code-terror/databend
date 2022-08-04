@@ -11,16 +11,15 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-//
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_base::infallible::RwLock;
 use common_exception::ErrorCode;
 use common_exception::Result;
 use common_meta_types::MetaId;
 use common_planners::Expression;
+use parking_lot::RwLock;
 
 use crate::catalogs::SYS_TBL_FUC_ID_END;
 use crate::catalogs::SYS_TBL_FUNC_ID_BEGIN;
@@ -28,6 +27,7 @@ use crate::storages::fuse::table_functions::ClusteringInformationTable;
 use crate::storages::fuse::table_functions::FuseSegmentTable;
 use crate::storages::fuse::table_functions::FuseSnapshotTable;
 use crate::table_functions::async_crash_me::AsyncCrashMeTable;
+use crate::table_functions::sync_crash_me::SyncCrashMeTable;
 use crate::table_functions::NumbersTable;
 use crate::table_functions::TableFunction;
 
@@ -109,6 +109,11 @@ impl TableFunctionFactory {
         creators.insert(
             "clustering_information".to_string(),
             (next_id(), Arc::new(ClusteringInformationTable::create)),
+        );
+
+        creators.insert(
+            "sync_crash_me".to_string(),
+            (next_id(), Arc::new(SyncCrashMeTable::create)),
         );
 
         creators.insert(

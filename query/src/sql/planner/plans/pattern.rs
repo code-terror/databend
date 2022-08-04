@@ -12,18 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::sql::plans::LogicalPlan;
+use crate::sql::plans::LogicalOperator;
 use crate::sql::plans::Operator;
-use crate::sql::plans::PhysicalPlan;
-use crate::sql::plans::PlanType;
+use crate::sql::plans::PhysicalOperator;
+use crate::sql::plans::RelOp;
 
 #[derive(Clone, Debug)]
 pub struct PatternPlan {
-    pub plan_type: PlanType,
+    pub plan_type: RelOp,
 }
 
 impl Operator for PatternPlan {
-    fn plan_type(&self) -> PlanType {
+    fn rel_op(&self) -> RelOp {
         self.plan_type.clone()
     }
 
@@ -39,11 +39,11 @@ impl Operator for PatternPlan {
         true
     }
 
-    fn as_physical(&self) -> Option<&dyn PhysicalPlan> {
+    fn as_physical(&self) -> Option<&dyn PhysicalOperator> {
         None
     }
 
-    fn as_logical(&self) -> Option<&dyn LogicalPlan> {
+    fn as_logical(&self) -> Option<&dyn LogicalOperator> {
         None
     }
 }

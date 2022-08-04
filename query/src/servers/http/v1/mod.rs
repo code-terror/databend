@@ -16,7 +16,9 @@ mod http_query_handlers;
 pub mod json_block;
 mod load;
 mod multipart_format;
+mod parallel_format_source;
 mod query;
+mod sequential_format_source;
 mod stage;
 
 pub use http_query_handlers::make_final_uri;
@@ -32,7 +34,6 @@ pub use query::ExecuteStateKind;
 pub use query::HttpQueryContext;
 pub use query::HttpQueryHandle;
 pub use query::HttpQueryManager;
-pub use query::HttpSession;
 pub use query::HttpSessionConf;
 pub use stage::upload_to_stage;
 pub use stage::UploadToStageResponse;

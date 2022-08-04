@@ -14,15 +14,17 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use common_base::containers::ItemManager;
 use common_base::containers::Pool;
 use common_meta_sled_store::openraft;
 use common_meta_sled_store::openraft::MessageSummary;
 use common_meta_types::protobuf::raft_service_client::RaftServiceClient;
+use common_meta_types::protobuf::RaftRequest;
+use common_meta_types::Endpoint;
 use common_meta_types::LogEntry;
 use common_meta_types::NodeId;
-use common_tracing::tracing;
 use openraft::async_trait::async_trait;
 use openraft::raft::AppendEntriesRequest;
 use openraft::raft::AppendEntriesResponse;
@@ -33,7 +35,16 @@ use openraft::raft::VoteResponse;
 use openraft::RaftNetwork;
 use tonic::client::GrpcService;
 use tonic::transport::channel::Channel;
+use tracing::debug;
 
+use crate::metrics::incr_meta_metrics_active_peers;
+use crate::metrics::incr_meta_metrics_fail_connections_to_peer;
+use crate::metrics::incr_meta_metrics_sent_bytes_to_peer;
+use crate::metrics::incr_meta_metrics_sent_failure_to_peer;
+use crate::metrics::incr_meta_metrics_snapshot_send_failures_to_peer;
+use crate::metrics::incr_meta_metrics_snapshot_send_inflights_to_peer;
+use crate::metrics::incr_meta_metrics_snapshot_send_success_to_peer;
+use crate::metrics::sample_meta_metrics_snapshot_sent;
 use crate::store::MetaRaftStore;
 
 struct ChannelManager {}
@@ -72,18 +83,34 @@ impl Network {
     }
 
     #[tracing::instrument(level = "debug", skip(self), fields(id=self.sto.id))]
-    pub async fn make_client(&self, target: &NodeId) -> anyhow::Result<RaftServiceClient<Channel>> {
+    pub async fn make_client(
+        &self,
+        target: &NodeId,
+    ) -> anyhow::Result<(RaftServiceClient<Channel>, Endpoint)> {
         let endpoint = self.sto.get_node_endpoint(target).await?;
         let addr = format!("http://{}", endpoint);
 
-        tracing::debug!("connect: target={}: {}", target, addr);
+        debug!("connect: target={}: {}", target, addr);
 
-        let channel = self.conn_pool.get(&addr).await?;
-        let client = RaftServiceClient::new(channel);
+        match self.conn_pool.get(&addr).await {
+            Ok(channel) => {
+                incr_meta_metrics_active_peers(target, &endpoint.clone().into(), 1);
+                let client = RaftServiceClient::new(channel);
 
-        tracing::info!("connected: target={}: {}", target, addr);
+                debug!("connected: target={}: {}", target, addr);
 
-        Ok(client)
+                Ok((client, endpoint))
+            }
+            Err(err) => {
+                incr_meta_metrics_fail_connections_to_peer(target, &endpoint.into());
+                Err(err.into())
+            }
+        }
+    }
+
+    fn incr_meta_metrics_sent_bytes_to_peer(&self, target: &NodeId, message: &RaftRequest) {
+        let bytes = message.data.len() as u64;
+        incr_meta_metrics_sent_bytes_to_peer(target, bytes);
     }
 }
 
@@ -95,18 +122,24 @@ impl RaftNetwork<LogEntry> for Network {
         target: NodeId,
         rpc: AppendEntriesRequest<LogEntry>,
     ) -> anyhow::Result<AppendEntriesResponse> {
-        tracing::debug!("append_entries req to: id={}: {:?}", target, rpc);
+        debug!("append_entries req to: id={}: {:?}", target, rpc);
 
-        let mut client = self.make_client(&target).await?;
+        let (mut client, endpoint) = self.make_client(&target).await?;
 
         let req = common_tracing::inject_span_to_tonic_request(rpc);
 
-        let resp = client.append_entries(req).await;
-        tracing::debug!("append_entries resp from: id={}: {:?}", target, resp);
+        self.incr_meta_metrics_sent_bytes_to_peer(&target, req.get_ref());
 
+        let resp = client.append_entries(req).await;
+        debug!("append_entries resp from: id={}: {:?}", target, resp);
+
+        if resp.is_err() {
+            incr_meta_metrics_sent_failure_to_peer(&target);
+        }
         let resp = resp?;
         let mes = resp.into_inner();
         let resp = serde_json::from_str(&mes.data)?;
+        incr_meta_metrics_active_peers(&target, &endpoint.into(), -1);
 
         Ok(resp)
     }
@@ -117,32 +150,56 @@ impl RaftNetwork<LogEntry> for Network {
         target: NodeId,
         rpc: InstallSnapshotRequest,
     ) -> anyhow::Result<InstallSnapshotResponse> {
-        tracing::debug!("install_snapshot req to: id={}", target);
+        debug!("install_snapshot req to: id={}", target);
 
-        let mut client = self.make_client(&target).await?;
+        let start = Instant::now();
+        let (mut client, endpoint) = self.make_client(&target).await?;
         let req = common_tracing::inject_span_to_tonic_request(rpc);
+
+        self.incr_meta_metrics_sent_bytes_to_peer(&target, req.get_ref());
+        incr_meta_metrics_snapshot_send_inflights_to_peer(&target, 1);
+
         let resp = client.install_snapshot(req).await;
-        tracing::debug!("install_snapshot resp from: id={}: {:?}", target, resp);
+        debug!("install_snapshot resp from: id={}: {:?}", target, resp);
+
+        if resp.is_err() {
+            incr_meta_metrics_sent_failure_to_peer(&target);
+            incr_meta_metrics_snapshot_send_failures_to_peer(&target);
+        } else {
+            incr_meta_metrics_snapshot_send_success_to_peer(&target);
+        }
+        incr_meta_metrics_snapshot_send_inflights_to_peer(&target, -1);
 
         let resp = resp?;
         let mes = resp.into_inner();
         let resp = serde_json::from_str(&mes.data)?;
+
+        sample_meta_metrics_snapshot_sent(&target, start.elapsed().as_secs() as f64);
+        incr_meta_metrics_active_peers(&target, &endpoint.into(), -1);
 
         Ok(resp)
     }
 
     #[tracing::instrument(level = "debug", skip(self), fields(id=self.sto.id))]
     async fn send_vote(&self, target: NodeId, rpc: VoteRequest) -> anyhow::Result<VoteResponse> {
-        tracing::debug!("vote: req to: target={} {:?}", target, rpc);
+        debug!("vote: req to: target={} {:?}", target, rpc);
 
-        let mut client = self.make_client(&target).await?;
+        let (mut client, endpoint) = self.make_client(&target).await?;
         let req = common_tracing::inject_span_to_tonic_request(rpc);
+
+        self.incr_meta_metrics_sent_bytes_to_peer(&target, req.get_ref());
+
         let resp = client.vote(req).await;
-        tracing::info!("vote: resp from target={} {:?}", target, resp);
+        debug!("vote: resp from target={} {:?}", target, resp);
+
+        if resp.is_err() {
+            incr_meta_metrics_sent_failure_to_peer(&target);
+        }
 
         let resp = resp?;
         let mes = resp.into_inner();
         let resp = serde_json::from_str(&mes.data)?;
+        incr_meta_metrics_active_peers(&target, &endpoint.into(), -1);
 
         Ok(resp)
     }

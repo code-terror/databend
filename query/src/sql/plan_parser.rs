@@ -22,7 +22,7 @@ use common_planners::Expression;
 use common_planners::PlanBuilder;
 use common_planners::PlanNode;
 use common_planners::SelectPlan;
-use common_tracing::tracing;
+use tracing::debug;
 
 use super::statements::ExpressionSyncAnalyzer;
 use crate::sessions::QueryContext;
@@ -49,14 +49,8 @@ impl PlanParser {
         let (statements, _) = DfParser::parse_sql(query, ctx.get_current_session().get_type())?;
         let mut format = None;
         if !statements.is_empty() {
-            match &statements[0] {
-                DfStatement::Query(q) => {
-                    format = q.format.clone();
-                }
-                DfStatement::InsertQuery(q) => {
-                    format = q.format.clone();
-                }
-                _ => {}
+            if let DfStatement::Query(q) = &statements[0] {
+                format = q.format.clone();
             }
         };
         let plan = PlanParser::build_plan(statements, ctx).await?;
@@ -115,31 +109,34 @@ impl PlanParser {
 
     pub fn build_query_plan(data: &QueryAnalyzeState) -> Result<PlanNode> {
         let from = Self::build_from_plan(data)?;
-        tracing::debug!("Build from plan:\n{:?}", from);
+        debug!("Build from plan:\n{:?}", from);
 
         let filter = Self::build_filter_plan(from, data)?;
-        tracing::debug!("Build filter plan:\n{:?}", filter);
+        debug!("Build filter plan:\n{:?}", filter);
 
         let group_by = Self::build_group_by_plan(filter, data)?;
-        tracing::debug!("Build group_by plan:\n{:?}", group_by);
+        debug!("Build group_by plan:\n{:?}", group_by);
 
         let before_order = Self::build_before_order(group_by, data)?;
-        tracing::debug!("Build before_order plan:\n{:?}", before_order);
+        debug!("Build before_order plan:\n{:?}", before_order);
 
         let having = Self::build_having_plan(before_order, data)?;
-        tracing::debug!("Build having plan:\n{:?}", having);
+        debug!("Build having plan:\n{:?}", having);
 
-        let distinct = Self::build_distinct_plan(having, data)?;
-        tracing::debug!("Build distinct plan:\n{:?}", distinct);
+        let window = Self::build_window_plan(having, data)?;
+        debug!("Build window plan node:\n{:?}", window);
+
+        let distinct = Self::build_distinct_plan(window, data)?;
+        debug!("Build distinct plan:\n{:?}", distinct);
 
         let order_by = Self::build_order_by_plan(distinct, data)?;
-        tracing::debug!("Build order_by plan:\n{:?}", order_by);
+        debug!("Build order_by plan:\n{:?}", order_by);
 
         let projection = Self::build_projection_plan(order_by, data)?;
-        tracing::debug!("Build projection plan:\n{:?}", projection);
+        debug!("Build projection plan:\n{:?}", projection);
 
         let limit = Self::build_limit_plan(projection, data)?;
-        tracing::debug!("Build limit plan:\n{:?}", limit);
+        debug!("Build limit plan:\n{:?}", limit);
 
         Ok(PlanNode::Select(SelectPlan {
             input: Arc::new(limit),
@@ -252,6 +249,18 @@ impl PlanParser {
                     .expression(&data.expressions, "Before OrderBy")?
                     .build(),
             },
+        }
+    }
+
+    fn build_window_plan(plan: PlanNode, data: &QueryAnalyzeState) -> Result<PlanNode> {
+        match data.window_expressions.is_empty() {
+            true => Ok(plan),
+            false => {
+                let exprs = data.window_expressions.to_vec();
+                exprs.into_iter().try_fold(plan, |input, window_func| {
+                    PlanBuilder::from(&input).window_func(window_func)?.build()
+                })
+            }
         }
     }
 

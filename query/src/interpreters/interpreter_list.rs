@@ -15,22 +15,18 @@
 use std::sync::Arc;
 
 use common_datablocks::DataBlock;
+use common_datavalues::DataSchemaRef;
 use common_datavalues::Series;
 use common_datavalues::SeriesFrom;
-use common_exception::ErrorCode;
 use common_exception::Result;
-use common_io::prelude::get_file_name;
-use common_io::prelude::operator_list_files;
 use common_planners::ListPlan;
 use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
-use common_tracing::tracing;
-use regex::Regex;
 
+use crate::interpreters::interpreter_common::list_files;
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::sessions::QueryContext;
-use crate::storages::stage::StageSource;
+use crate::sessions::TableContext;
 
 pub struct ListInterpreter {
     ctx: Arc<QueryContext>,
@@ -38,33 +34,8 @@ pub struct ListInterpreter {
 }
 
 impl ListInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, plan: ListPlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(ListInterpreter { ctx, plan }))
-    }
-
-    async fn list_files(&self) -> Result<Vec<String>> {
-        let op = StageSource::get_op(&self.ctx, &self.plan.stage).await?;
-        let pattern = &self.plan.pattern;
-        let path = &self.plan.path;
-        let mut files = operator_list_files(&op, path).await?;
-
-        if !pattern.is_empty() {
-            let regex = Regex::new(pattern).map_err(|e| {
-                ErrorCode::SyntaxException(format!(
-                    "Pattern format invalid, got:{}, error:{:?}",
-                    pattern, e
-                ))
-            })?;
-
-            let matched_files = files
-                .iter()
-                .filter(|file| regex.is_match(file))
-                .cloned()
-                .collect();
-            files = matched_files;
-        }
-
-        Ok(files)
+    pub fn try_create(ctx: Arc<QueryContext>, plan: ListPlan) -> Result<Self> {
+        Ok(ListInterpreter { ctx, plan })
     }
 }
 
@@ -74,18 +45,41 @@ impl Interpreter for ListInterpreter {
         "ListInterpreter"
     }
 
-    #[tracing::instrument(level = "debug", name = "list_interpreter_execute", skip(self, _input_stream), fields(ctx.id = self.ctx.get_id().as_str()))]
-    async fn execute(
-        &self,
-        mut _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
-        let files = self.list_files().await?;
-        tracing::info!("list file list:{:?}, pattern:{}", &files, self.plan.pattern);
+    fn schema(&self) -> DataSchemaRef {
+        self.plan.schema()
+    }
 
-        // file path to filename
-        let files: Vec<String> = files.iter().map(|file| get_file_name(file)).collect();
+    #[tracing::instrument(level = "debug", name = "list_interpreter_execute", skip(self), fields(ctx.id = self.ctx.get_id().as_str()))]
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
+        let plan = &self.plan;
+        let files = list_files(&self.ctx, &plan.stage, &plan.path, &plan.pattern).await?;
 
-        let block = DataBlock::create(self.plan.schema(), vec![Series::from_data(files)]);
+        let names: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
+        let sizes: Vec<u64> = files.iter().map(|file| file.size).collect();
+        let md5s: Vec<Option<Vec<u8>>> = files
+            .iter()
+            .map(|file| file.md5.as_ref().map(|f| f.to_string().into_bytes()))
+            .collect();
+        let last_modifieds: Vec<String> = files
+            .iter()
+            .map(|file| {
+                file.last_modified
+                    .format("%Y-%m-%d %H:%M:%S.%3f %z")
+                    .to_string()
+            })
+            .collect();
+        let creators: Vec<Option<Vec<u8>>> = files
+            .iter()
+            .map(|file| file.creator.as_ref().map(|c| c.to_string().into_bytes()))
+            .collect();
+
+        let block = DataBlock::create(self.plan.schema(), vec![
+            Series::from_data(names),
+            Series::from_data(sizes),
+            Series::from_data(md5s),
+            Series::from_data(last_modifieds),
+            Series::from_data(creators),
+        ]);
         Ok(Box::pin(DataBlockStream::create(
             self.plan.schema(),
             None,

@@ -26,7 +26,6 @@ use common_base::base::tokio;
 use common_base::base::tokio::task::JoinHandle;
 use common_exception::ErrorCode;
 use common_exception::Result;
-use common_tracing::tracing;
 use hyper::client::connect::dns::Name;
 use hyper::client::HttpConnector;
 use hyper::service::Service;
@@ -38,6 +37,7 @@ use tonic::transport::Certificate;
 use tonic::transport::Channel;
 use tonic::transport::ClientTlsConfig;
 use tonic::transport::Endpoint;
+use tracing::info;
 use trust_dns_resolver::TokioAsyncResolver;
 
 use crate::RpcClientTlsConfig;
@@ -141,7 +141,7 @@ impl Future for DNSServiceFuture {
 pub struct ConnectionFactory;
 
 impl ConnectionFactory {
-    pub fn create_rpc_channel(
+    pub async fn create_rpc_channel(
         addr: impl ToString,
         timeout: Option<Duration>,
         rpc_client_config: Option<RpcClientTlsConfig>,
@@ -153,7 +153,8 @@ impl ConnectionFactory {
         inner_connector.set_keepalive(None);
         inner_connector.enforce_http(false);
 
-        match endpoint.connect_with_connector_lazy(inner_connector) {
+        // check connection immediately
+        match endpoint.connect_with_connector(inner_connector).await {
             Ok(channel) => Ok(channel),
             Err(error) => Err(GrpcConnectionError::CannotConnect {
                 uri: endpoint.uri().to_string(),
@@ -176,7 +177,7 @@ impl ConnectionFactory {
                 let builder = Channel::builder(uri);
 
                 let mut endpoint = if let Some(conf) = rpc_client_config {
-                    tracing::info!("tls rpc enabled");
+                    info!("tls rpc enabled");
                     let client_tls_config = Self::client_tls_config(&conf).map_err(|e| {
                         GrpcConnectionError::TLSConfigError {
                             action: "loading".to_string(),
@@ -213,7 +214,7 @@ impl ConnectionFactory {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, thiserror::Error)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
 pub enum GrpcConnectionError {
     #[error("invalid uri: {uri}, error: {source}")]
     InvalidUri {

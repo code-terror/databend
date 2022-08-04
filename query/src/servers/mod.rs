@@ -19,11 +19,14 @@ pub use server::Server;
 pub use server::ShutdownHandle;
 
 pub use self::http::HttpHandler;
+pub use self::http::HttpHandlerKind;
 pub use self::mysql::MySQLConnection;
 pub use self::mysql::MySQLFederated;
 pub use self::mysql::MySQLHandler;
 
 pub(crate) mod clickhouse;
+pub(crate) mod federated_helper;
 pub mod http;
 mod mysql;
 pub(crate) mod server;
+mod utils;

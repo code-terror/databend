@@ -26,6 +26,8 @@ use common_meta_types::Operation;
 use common_meta_types::PbSeqV;
 use common_meta_types::SeqV;
 use common_meta_types::TxnCondition;
+use common_meta_types::TxnDeleteByPrefixRequest;
+use common_meta_types::TxnDeleteByPrefixResponse;
 use common_meta_types::TxnDeleteRequest;
 use common_meta_types::TxnDeleteResponse;
 use common_meta_types::TxnGetRequest;
@@ -37,10 +39,11 @@ use common_meta_types::TxnPutResponse;
 use common_meta_types::TxnReply;
 use common_meta_types::TxnRequest;
 use common_meta_types::UpsertKVReq;
-use common_tracing::tracing;
+use tracing::debug;
+use tracing::info;
 
+use crate::ApiBuilder;
 use crate::KVApi;
-use crate::KVApiBuilder;
 
 pub struct KVApiTestSuite {}
 
@@ -49,7 +52,7 @@ impl KVApiTestSuite {
     pub async fn test_all<KV, B>(&self, builder: B) -> anyhow::Result<()>
     where
         KV: KVApi,
-        B: KVApiBuilder<KV>,
+        B: ApiBuilder<KV>,
     {
         self.kv_write_read(&builder.build().await).await?;
         self.kv_delete(&builder.build().await).await?;
@@ -60,6 +63,8 @@ impl KVApiTestSuite {
         self.kv_mget(&builder.build().await).await?;
         self.kv_txn_absent_seq_0(&builder.build().await).await?;
         self.kv_transaction(&builder.build().await).await?;
+        self.kv_delete_by_prefix_transaction(&builder.build().await)
+            .await?;
 
         // Run cross node test on every 2 adjacent nodes
         let mut i = 0;
@@ -81,7 +86,7 @@ impl KVApiTestSuite {
 impl KVApiTestSuite {
     #[tracing::instrument(level = "info", skip(self, kv))]
     pub async fn kv_write_read<KV: KVApi>(&self, kv: &KV) -> anyhow::Result<()> {
-        tracing::info!("--- KVApiTestSuite::kv_write_read() start");
+        info!("--- KVApiTestSuite::kv_write_read() start");
         {
             // write
             let res = kv
@@ -143,7 +148,7 @@ impl KVApiTestSuite {
 
     #[tracing::instrument(level = "info", skip(self, kv))]
     pub async fn kv_delete<KV: KVApi>(&self, kv: &KV) -> anyhow::Result<()> {
-        tracing::info!("--- KVApiTestSuite::kv_delete() start");
+        info!("--- KVApiTestSuite::kv_delete() start");
         let test_key = "test_key";
         kv.upsert_kv(UpsertKVReq::new(
             test_key,
@@ -225,7 +230,7 @@ impl KVApiTestSuite {
 
     #[tracing::instrument(level = "info", skip(self, kv))]
     pub async fn kv_update<KV: KVApi>(&self, kv: &KV) -> anyhow::Result<()> {
-        tracing::info!("--- KVApiTestSuite::kv_update() start");
+        info!("--- KVApiTestSuite::kv_update() start");
         let test_key = "test_key_for_update";
 
         let r = kv
@@ -298,7 +303,7 @@ impl KVApiTestSuite {
 
     #[tracing::instrument(level = "info", skip(self, kv))]
     pub async fn kv_timeout<KV: KVApi>(&self, kv: &KV) -> anyhow::Result<()> {
-        tracing::info!("--- KVApiTestSuite::kv_timeout() start");
+        info!("--- KVApiTestSuite::kv_timeout() start");
 
         // - Test get  expired and non-expired.
         // - Test mget expired and non-expired.
@@ -320,17 +325,17 @@ impl KVApiTestSuite {
         ))
         .await?;
 
-        tracing::info!("---get unexpired");
+        info!("---get unexpired");
         {
             let res = kv.get_kv("k1").await?;
             assert!(res.is_some(), "got unexpired");
         }
 
-        tracing::info!("---get expired");
+        info!("---get expired");
         {
             tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
             let res = kv.get_kv("k1").await?;
-            tracing::debug!("got k1:{:?}", res);
+            debug!("got k1:{:?}", res);
             assert!(res.is_none(), "got expired");
         }
 
@@ -339,7 +344,7 @@ impl KVApiTestSuite {
             .unwrap()
             .as_secs();
 
-        tracing::info!("--- expired entry act as if it does not exist, an ADD op should apply");
+        info!("--- expired entry act as if it does not exist, an ADD op should apply");
         {
             kv.upsert_kv(UpsertKVReq::new(
                 "k1",
@@ -360,7 +365,7 @@ impl KVApiTestSuite {
             ))
             .await?;
 
-            tracing::info!("--- mget should not return expired");
+            info!("--- mget should not return expired");
             let res = kv.mget_kv(&["k1".to_string(), "k2".to_string()]).await?;
             assert_eq!(res, vec![
                 None,
@@ -374,7 +379,7 @@ impl KVApiTestSuite {
             ]);
         }
 
-        tracing::info!("--- list should not return expired");
+        info!("--- list should not return expired");
         {
             let res = kv.prefix_list_kv("k").await?;
             let res_vec = res.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>();
@@ -382,7 +387,7 @@ impl KVApiTestSuite {
             assert_eq!(res_vec, vec!["k2".to_string(),]);
         }
 
-        tracing::info!("--- update expire");
+        info!("--- update expire");
         {
             kv.upsert_kv(UpsertKVReq::new(
                 "k2",
@@ -403,7 +408,7 @@ impl KVApiTestSuite {
 
     #[tracing::instrument(level = "info", skip(self, kv))]
     pub async fn kv_meta<KV: KVApi>(&self, kv: &KV) -> anyhow::Result<()> {
-        tracing::info!("--- KVApiTestSuite::kv_meta() start");
+        info!("--- KVApiTestSuite::kv_meta() start");
 
         let test_key = "test_key_for_update_meta";
 
@@ -423,7 +428,7 @@ impl KVApiTestSuite {
         assert_eq!(Some(SeqV::with_meta(1, None, b"v1".to_vec())), r.result);
         let seq = r.result.unwrap().seq;
 
-        tracing::info!("--- mismatching seq does nothing");
+        info!("--- mismatching seq does nothing");
 
         let r = kv
             .upsert_kv(UpsertKVReq::new(
@@ -438,7 +443,7 @@ impl KVApiTestSuite {
         assert_eq!(Some(SeqV::with_meta(1, None, b"v1".to_vec())), r.prev);
         assert_eq!(Some(SeqV::with_meta(1, None, b"v1".to_vec())), r.result);
 
-        tracing::info!("--- matching seq only update meta");
+        info!("--- matching seq only update meta");
 
         let r = kv
             .upsert_kv(UpsertKVReq::new(
@@ -462,7 +467,7 @@ impl KVApiTestSuite {
             r.result
         );
 
-        tracing::info!("--- get returns the value with meta and seq updated");
+        info!("--- get returns the value with meta and seq updated");
         let key_value = kv.get_kv(test_key).await?;
         assert!(key_value.is_some());
         assert_eq!(
@@ -481,7 +486,7 @@ impl KVApiTestSuite {
 
     #[tracing::instrument(level = "info", skip(self, kv))]
     pub async fn kv_list<KV: KVApi>(&self, kv: &KV) -> anyhow::Result<()> {
-        tracing::info!("--- KVApiTestSuite::kv_list() start");
+        info!("--- KVApiTestSuite::kv_list() start");
 
         let mut values = vec![];
         {
@@ -529,7 +534,7 @@ impl KVApiTestSuite {
 
     #[tracing::instrument(level = "info", skip(self, kv))]
     pub async fn kv_mget<KV: KVApi>(&self, kv: &KV) -> anyhow::Result<()> {
-        tracing::info!("--- KVApiTestSuite::kv_mget() start");
+        info!("--- KVApiTestSuite::kv_mget() start");
 
         kv.upsert_kv(UpsertKVReq::new(
             "k1",
@@ -561,8 +566,13 @@ impl KVApiTestSuite {
         Ok(())
     }
 
-    fn check_transaction_responses(&self, reply: &TxnReply, expected: &Vec<TxnOpResponse>) {
-        assert!(reply.success);
+    fn check_transaction_responses(
+        &self,
+        reply: &TxnReply,
+        expected: &Vec<TxnOpResponse>,
+        success: bool,
+    ) {
+        assert_eq!(reply.success, success);
         let responses = &reply.responses;
         assert_eq!(responses.len(), expected.len());
 
@@ -575,7 +585,7 @@ impl KVApiTestSuite {
     }
 
     pub async fn kv_txn_absent_seq_0<KV: KVApi>(&self, kv: &KV) -> anyhow::Result<()> {
-        tracing::info!("--- Absent record should has seq as 0");
+        info!("--- Absent record should has seq as 0");
 
         let k1 = "txn_0_absent";
 
@@ -611,13 +621,128 @@ impl KVApiTestSuite {
             })),
         }];
 
-        self.check_transaction_responses(&resp, &expected);
+        self.check_transaction_responses(&resp, &expected, true);
+
+        Ok(())
+    }
+
+    pub async fn kv_delete_by_prefix_transaction<KV: KVApi>(&self, kv: &KV) -> anyhow::Result<()> {
+        info!("--- KVApiTestSuite::kv_delete_by_prefix_transaction() start");
+        let test_prefix = "test";
+
+        let match_keys = vec![
+            format!("{}_key1", test_prefix),
+            format!("{}/key2", test_prefix),
+            format!("{}key3", test_prefix),
+        ];
+
+        let unmatch_keys = vec!["teskey4".to_string()];
+
+        for key in [match_keys.clone(), unmatch_keys.clone()].concat().iter() {
+            kv.upsert_kv(UpsertKVReq::new(
+                key,
+                MatchSeq::Any,
+                Operation::Update(b"v1".to_vec()),
+                None,
+            ))
+            .await?;
+
+            let current = kv.get_kv(key).await?;
+            assert!(current.is_some());
+        }
+
+        // test again with if condition
+        {
+            let txn_key = unmatch_keys.get(0).unwrap().to_string();
+            let condition = vec![TxnCondition {
+                key: txn_key.clone(),
+                expected: ConditionResult::Gt as i32,
+                target: Some(txn_condition::Target::Seq(0)),
+            }];
+
+            let if_then: Vec<TxnOp> = vec![TxnOp {
+                request: Some(txn_op::Request::DeleteByPrefix(TxnDeleteByPrefixRequest {
+                    prefix: test_prefix.to_string(),
+                })),
+            }];
+
+            let else_then: Vec<TxnOp> = vec![];
+            let txn = TxnRequest {
+                condition,
+                if_then,
+                else_then,
+            };
+
+            let resp = kv.transaction(txn).await?;
+
+            let expected: Vec<TxnOpResponse> = vec![TxnOpResponse {
+                response: Some(txn_op_response::Response::DeleteByPrefix(
+                    TxnDeleteByPrefixResponse {
+                        prefix: test_prefix.to_string(),
+                        count: match_keys.len() as u32,
+                    },
+                )),
+            }];
+
+            self.check_transaction_responses(&resp, &expected, true);
+
+            for key in match_keys.iter() {
+                let current = kv.get_kv(key).await?;
+                assert!(current.is_none());
+            }
+            for key in unmatch_keys.iter() {
+                let current = kv.get_kv(key).await?;
+                assert!(current.is_some());
+            }
+        }
+
+        // test again with else condition
+        {
+            let txn_key = "unmatch_keys".to_string();
+            let unmatch_prefix = unmatch_keys.get(0).unwrap().to_string();
+            let condition = vec![TxnCondition {
+                key: txn_key.clone(),
+                expected: ConditionResult::Gt as i32,
+                target: Some(txn_condition::Target::Seq(0)),
+            }];
+
+            let if_then: Vec<TxnOp> = vec![];
+
+            let else_then: Vec<TxnOp> = vec![TxnOp {
+                request: Some(txn_op::Request::DeleteByPrefix(TxnDeleteByPrefixRequest {
+                    prefix: unmatch_prefix.clone(),
+                })),
+            }];
+            let txn = TxnRequest {
+                condition,
+                if_then,
+                else_then,
+            };
+
+            let resp = kv.transaction(txn).await?;
+
+            let expected: Vec<TxnOpResponse> = vec![TxnOpResponse {
+                response: Some(txn_op_response::Response::DeleteByPrefix(
+                    TxnDeleteByPrefixResponse {
+                        prefix: unmatch_prefix.to_string(),
+                        count: unmatch_keys.len() as u32,
+                    },
+                )),
+            }];
+
+            self.check_transaction_responses(&resp, &expected, false);
+
+            for key in unmatch_keys.iter() {
+                let current = kv.get_kv(key).await?;
+                assert!(current.is_none());
+            }
+        }
 
         Ok(())
     }
 
     pub async fn kv_transaction<KV: KVApi>(&self, kv: &KV) -> anyhow::Result<()> {
-        tracing::info!("--- KVApiTestSuite::kv_transaction() start");
+        info!("--- KVApiTestSuite::kv_transaction() start");
         // first case: get and set one key transaction
         {
             let k1 = "txn_1_K1";
@@ -664,7 +789,7 @@ impl KVApiTestSuite {
                 })),
             }];
 
-            self.check_transaction_responses(&resp, &expected);
+            self.check_transaction_responses(&resp, &expected, true);
         }
         // second case: get two key(one not exist) and set one key transaction
         {
@@ -847,7 +972,7 @@ impl KVApiTestSuite {
                 },
             ];
 
-            self.check_transaction_responses(&resp, &expected);
+            self.check_transaction_responses(&resp, &expected, true);
         }
 
         // 4th case: get one key by value and set key transaction
@@ -917,7 +1042,7 @@ impl KVApiTestSuite {
                 },
             ];
 
-            self.check_transaction_responses(&resp, &expected);
+            self.check_transaction_responses(&resp, &expected, true);
         }
         Ok(())
     }
@@ -945,7 +1070,7 @@ impl KVApiTestSuite {
                 let key = format!("__users/{}", i);
                 let val = format!("val_{}", i);
                 values.push(val.clone());
-                tracing::info!("--- Start upsert-kv: {}", key);
+                info!("--- Start upsert-kv: {}", key);
                 kv1.upsert_kv(UpsertKVReq::new(
                     &key,
                     MatchSeq::Any,
@@ -953,7 +1078,7 @@ impl KVApiTestSuite {
                     None,
                 ))
                 .await?;
-                tracing::info!("--- Done upsert-kv: {}", key);
+                info!("--- Done upsert-kv: {}", key);
             }
 
             kv1.upsert_kv(UpsertKVReq::new(
@@ -965,14 +1090,14 @@ impl KVApiTestSuite {
             .await?;
         }
 
-        tracing::info!("--- test get on other node");
+        info!("--- test get on other node");
         {
             let res = kv2.get_kv("t").await?;
             let res = res.unwrap();
             assert_eq!(b"t".to_vec(), res.data);
         }
 
-        tracing::info!("--- test mget on other node");
+        info!("--- test mget on other node");
         {
             let res = kv2.mget_kv(&["u".to_string(), "v".to_string()]).await?;
             assert_eq!(
@@ -988,7 +1113,7 @@ impl KVApiTestSuite {
             );
         }
 
-        tracing::info!("--- test list on other node");
+        info!("--- test list on other node");
         {
             let res = kv2.prefix_list_kv("__users/").await?;
             assert_eq!(

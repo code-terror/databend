@@ -14,10 +14,10 @@
 
 use common_base::base::tokio;
 use common_exception::Result;
-use common_meta_types::CreateDatabaseReq;
-use common_meta_types::DatabaseNameIdent;
-use common_meta_types::DropDatabaseReq;
-use common_meta_types::RenameDatabaseReq;
+use common_meta_app::schema::CreateDatabaseReq;
+use common_meta_app::schema::DatabaseNameIdent;
+use common_meta_app::schema::DropDatabaseReq;
+use common_meta_app::schema::RenameDatabaseReq;
 use databend_query::catalogs::default::ImmutableCatalog;
 use databend_query::catalogs::Catalog;
 
@@ -95,7 +95,7 @@ async fn test_immutable_catalogs_database() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_immutable_catalogs_table() -> Result<()> {
     let tenant = "test";
-    let catalog = create_catalog()?;
+    let catalog = create_catalog().await?;
 
     let db_list_1 = catalog.list_tables(tenant, "system").await?;
     assert!(!db_list_1.is_empty());

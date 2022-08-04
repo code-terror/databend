@@ -20,11 +20,10 @@ use common_meta_types::StageType;
 use common_planners::CreateUserStagePlan;
 use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
-use common_tracing::tracing;
 
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 
 #[derive(Debug)]
 pub struct CreateUserStageInterpreter {
@@ -33,8 +32,8 @@ pub struct CreateUserStageInterpreter {
 }
 
 impl CreateUserStageInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, plan: CreateUserStagePlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(CreateUserStageInterpreter { ctx, plan }))
+    pub fn try_create(ctx: Arc<QueryContext>, plan: CreateUserStagePlan) -> Result<Self> {
+        Ok(CreateUserStageInterpreter { ctx, plan })
     }
 }
 
@@ -44,11 +43,8 @@ impl Interpreter for CreateUserStageInterpreter {
         "CreateUserStageInterpreter"
     }
 
-    #[tracing::instrument(level = "info", skip(self, _input_stream), fields(ctx.id = self.ctx.get_id().as_str()))]
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    #[tracing::instrument(level = "info", skip(self), fields(ctx.id = self.ctx.get_id().as_str()))]
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         let plan = self.plan.clone();
         let user_mgr = self.ctx.get_user_manager();
         let user_stage = plan.user_stage_info;
@@ -68,6 +64,8 @@ impl Interpreter for CreateUserStageInterpreter {
             op.object(&prefix).create().await?
         }
 
+        let mut user_stage = user_stage;
+        user_stage.creator = Some(self.ctx.get_current_user()?.identity());
         let _create_stage = user_mgr
             .add_stage(&plan.tenant, user_stage, plan.if_not_exists)
             .await?;

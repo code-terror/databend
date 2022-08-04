@@ -12,12 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::sync::Arc;
 
+use common_base::base::tokio;
 use common_exception::ErrorCode;
 use common_exception::Result;
 use common_hive_meta_store::TThriftHiveMetastoreSyncClient;
 use common_hive_meta_store::ThriftHiveMetastoreSyncClient;
+use common_meta_app::schema::CountTablesReply;
+use common_meta_app::schema::CountTablesReq;
+use common_meta_app::schema::CreateDatabaseReply;
+use common_meta_app::schema::CreateDatabaseReq;
+use common_meta_app::schema::CreateTableReq;
+use common_meta_app::schema::DropDatabaseReq;
+use common_meta_app::schema::DropTableReply;
+use common_meta_app::schema::DropTableReq;
+use common_meta_app::schema::RenameDatabaseReply;
+use common_meta_app::schema::RenameDatabaseReq;
+use common_meta_app::schema::RenameTableReply;
+use common_meta_app::schema::RenameTableReq;
+use common_meta_app::schema::TableIdent;
+use common_meta_app::schema::TableInfo;
+use common_meta_app::schema::TableMeta;
+use common_meta_app::schema::UndropDatabaseReply;
+use common_meta_app::schema::UndropDatabaseReq;
+use common_meta_app::schema::UndropTableReply;
+use common_meta_app::schema::UndropTableReq;
+use common_meta_app::schema::UpdateTableMetaReply;
+use common_meta_app::schema::UpdateTableMetaReq;
+use common_meta_app::schema::UpsertTableOptionReply;
+use common_meta_app::schema::UpsertTableOptionReq;
 use common_meta_types::*;
 use thrift::protocol::*;
 use thrift::transport::*;
@@ -55,6 +80,73 @@ impl HiveCatalog {
         let o_prot = TBinaryOutputProtocol::new(o_tran, true);
         Ok(ThriftHiveMetastoreSyncClient::new(i_prot, o_prot))
     }
+
+    #[tracing::instrument(level = "info", skip(self))]
+    pub async fn get_partition_names_async(
+        &self,
+        db: String,
+        table: String,
+        max_parts: i16,
+    ) -> Result<Vec<String>> {
+        let client = self.get_client()?;
+        tokio::task::spawn_blocking(move || {
+            Self::do_get_partition_names(client, db, table, max_parts)
+        })
+        .await
+        .unwrap()
+    }
+
+    pub fn do_get_partition_names(
+        client: impl TThriftHiveMetastoreSyncClient,
+        db: String,
+        table: String,
+        max_parts: i16,
+    ) -> Result<Vec<String>> {
+        let mut client = client;
+        client
+            .get_partition_names(db, table, max_parts)
+            .map_err(from_thrift_error)
+    }
+
+    fn do_get_table(
+        client: impl TThriftHiveMetastoreSyncClient,
+        db_name: String,
+        table_name: String,
+    ) -> Result<Arc<dyn Table>> {
+        let mut client = client;
+        let table_meta = client
+            .get_table(db_name.clone(), table_name.clone())
+            .map_err(from_thrift_error)?;
+
+        if let Some(sd) = table_meta.sd.as_ref() {
+            if let Some(input_format) = sd.input_format.as_ref() {
+                if input_format != "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat" {
+                    return Err(ErrorCode::UnImplement(format!(
+                        "only support parquet, {} not support",
+                        input_format
+                    )));
+                }
+            }
+        }
+
+        let fields = client
+            .get_schema(db_name, table_name)
+            .map_err(from_thrift_error)?;
+        let table_info: TableInfo = super::converters::try_into_table_info(table_meta, fields)?;
+        let res: Arc<dyn Table> = Arc::new(HiveTable::try_create(table_info)?);
+        Ok(res)
+    }
+
+    fn do_get_database(
+        client: impl TThriftHiveMetastoreSyncClient,
+        db_name: String,
+    ) -> Result<Arc<dyn Database>> {
+        let mut client = client;
+        let thrift_db_meta = client.get_database(db_name).map_err(from_thrift_error)?;
+        let hive_database: HiveDatabase = thrift_db_meta.into();
+        let res: Arc<dyn Database> = Arc::new(hive_database);
+        Ok(res)
+    }
 }
 
 fn from_thrift_error(error: thrift::Error) -> ErrorCode {
@@ -63,14 +155,18 @@ fn from_thrift_error(error: thrift::Error) -> ErrorCode {
 
 #[async_trait::async_trait]
 impl Catalog for HiveCatalog {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    #[tracing::instrument(level = "info", skip(self))]
     async fn get_database(&self, _tenant: &str, db_name: &str) -> Result<Arc<dyn Database>> {
-        let thrift_db_meta = self
-            .get_client()?
-            .get_database(db_name.to_owned())
-            .map_err(from_thrift_error)?;
-        let hive_database: HiveDatabase = thrift_db_meta.into();
-        let res: Arc<dyn Database> = Arc::new(hive_database);
-        Ok(res)
+        let client = self.get_client()?;
+        let _tenant = _tenant.to_string();
+        let db_name = db_name.to_string();
+        tokio::task::spawn_blocking(move || Self::do_get_database(client, db_name))
+            .await
+            .unwrap()
     }
 
     // Get all the databases.
@@ -91,6 +187,12 @@ impl Catalog for HiveCatalog {
         ))
     }
 
+    async fn undrop_database(&self, _req: UndropDatabaseReq) -> Result<UndropDatabaseReply> {
+        Err(ErrorCode::UnImplement(
+            "Cannot undrop database in HIVE catalog",
+        ))
+    }
+
     async fn rename_database(&self, _req: RenameDatabaseReq) -> Result<RenameDatabaseReply> {
         Err(ErrorCode::UnImplement(
             "Cannot rename database in HIVE catalog",
@@ -98,7 +200,7 @@ impl Catalog for HiveCatalog {
     }
 
     fn get_table_by_info(&self, table_info: &TableInfo) -> Result<Arc<dyn Table>> {
-        let res: Arc<dyn Table> = Arc::new(HiveTable::create(table_info.clone()));
+        let res: Arc<dyn Table> = Arc::new(HiveTable::try_create(table_info.clone())?);
         Ok(res)
     }
 
@@ -112,22 +214,19 @@ impl Catalog for HiveCatalog {
     }
 
     // Get one table by db and table name.
+    #[tracing::instrument(level = "info", skip(self))]
     async fn get_table(
         &self,
         _tenant: &str,
         db_name: &str,
         table_name: &str,
     ) -> Result<Arc<dyn Table>> {
-        let mut client = self.get_client()?;
-        let table_meta = client
-            .get_table(db_name.to_owned(), table_name.to_owned())
-            .map_err(from_thrift_error)?;
-        let fields = client
-            .get_schema(db_name.to_owned(), table_name.to_owned())
-            .map_err(from_thrift_error)?;
-        let table_info: TableInfo = super::converters::try_into_table_info(table_meta, fields)?;
-        let res: Arc<dyn Table> = Arc::new(HiveTable::create(table_info));
-        Ok(res)
+        let client = self.get_client()?;
+        let db_name = db_name.to_string();
+        let table_name = table_name.to_string();
+        tokio::task::spawn_blocking(move || Self::do_get_table(client, db_name, table_name))
+            .await
+            .unwrap()
     }
 
     async fn list_tables(&self, _tenant: &str, _db_name: &str) -> Result<Vec<Arc<dyn Table>>> {
@@ -196,9 +295,11 @@ impl Catalog for HiveCatalog {
         ))
     }
 
-    ///
+    async fn count_tables(&self, _req: CountTablesReq) -> Result<CountTablesReply> {
+        unimplemented!()
+    }
+
     /// Table function
-    ///
 
     // Get function by name.
     fn get_table_function(

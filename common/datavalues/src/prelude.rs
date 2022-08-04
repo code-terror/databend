@@ -24,6 +24,7 @@ pub use crate::data_value::DFTryFrom;
 pub use crate::data_value::*;
 pub use crate::macros::*;
 pub use crate::scalars::*;
+pub use crate::struct_value::*;
 pub use crate::types::*;
 pub use crate::utils::*;
 // common structs
@@ -32,7 +33,7 @@ pub use crate::DataSchema;
 pub use crate::DataSchemaRef;
 pub use crate::DataSchemaRefExt;
 pub use crate::DataValue;
-//operators
+// operators
 pub use crate::DataValueBinaryOperator;
 pub use crate::DataValueComparisonOperator;
 pub use crate::DataValueLogicOperator;

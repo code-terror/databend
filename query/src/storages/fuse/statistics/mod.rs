@@ -13,10 +13,13 @@
 //  limitations under the License.
 
 pub mod accumulator;
+mod block_statistics;
+mod column_statistic;
 pub mod reducers;
 
-pub use accumulator::PartiallyAccumulated;
 pub use accumulator::StatisticsAccumulator;
+pub use block_statistics::BlockStatistics;
+pub use column_statistic::gen_columns_statistics;
+pub use column_statistic::traverse;
 pub use reducers::merge_statistics;
-pub use reducers::reduce_block_stats;
-pub use reducers::reduce_cluster_stats;
+pub use reducers::reduce_block_statistics;

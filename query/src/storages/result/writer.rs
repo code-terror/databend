@@ -14,18 +14,19 @@
 
 use std::sync::Arc;
 
+use common_datablocks::serialize_data_blocks;
 use common_datablocks::DataBlock;
 use common_exception::Result;
+use common_fuse_meta::meta::SegmentInfo;
+use common_fuse_meta::meta::Statistics as FuseMetaStatistics;
 use common_planners::PartInfoPtr;
 use common_streams::SendableDataBlockStream;
 use futures::StreamExt;
 use opendal::Operator;
 
 use crate::sessions::QueryContext;
-use crate::storages::fuse::io::serialize_data_blocks;
-use crate::storages::fuse::meta::SegmentInfo;
-use crate::storages::fuse::meta::Statistics as FuseMetaStatistics;
-use crate::storages::fuse::statistics::accumulator::BlockStatistics;
+use crate::sessions::TableContext;
+use crate::storages::fuse::statistics::BlockStatistics;
 use crate::storages::fuse::statistics::StatisticsAccumulator;
 use crate::storages::fuse::FuseTable;
 use crate::storages::result::result_locations::ResultLocations;
@@ -34,6 +35,7 @@ use crate::storages::result::result_table::ResultTableMeta;
 use crate::storages::result::ResultQueryInfo;
 
 pub struct ResultTableWriter {
+    stopped: bool,
     pub query_info: ResultQueryInfo,
     pub data_accessor: Operator,
     pub locations: ResultLocations,
@@ -49,17 +51,25 @@ impl ResultTableWriter {
             locations: ResultLocations::new(&query_id),
             data_accessor,
             accumulator: StatisticsAccumulator::new(),
+            stopped: false,
         })
     }
 
-    pub async fn abort(&self) -> Result<()> {
+    pub async fn abort(&mut self) -> Result<()> {
+        if self.stopped {
+            return Ok(());
+        }
         for meta in &self.accumulator.blocks_metas {
             self.data_accessor.object(&meta.location.0).delete().await?;
         }
+        self.stopped = true;
         Ok(())
     }
 
     pub async fn commit(&mut self) -> Result<()> {
+        if self.stopped {
+            return Ok(());
+        }
         let acc = std::mem::take(&mut self.accumulator);
         let col_stats = acc.summary()?;
         let segment_info = SegmentInfo::new(acc.blocks_metas, FuseMetaStatistics {
@@ -68,7 +78,7 @@ impl ResultTableWriter {
             uncompressed_byte_size: acc.in_memory_size,
             compressed_byte_size: acc.file_size,
             col_stats,
-            cluster_stats: None,
+            index_size: 0,
         });
 
         let meta = ResultTableMeta {
@@ -81,6 +91,7 @@ impl ResultTableWriter {
             .object(&meta_location)
             .write(meta_data)
             .await?;
+        self.stopped = true;
         Ok(())
     }
 
@@ -99,7 +110,7 @@ impl ResultTableWriter {
                 e
             })?;
         self.accumulator
-            .add_block(size, meta_data, block_statistics)?;
+            .add_block(size, meta_data, block_statistics, None, 0)?;
         Ok(self.get_last_part_info())
     }
 

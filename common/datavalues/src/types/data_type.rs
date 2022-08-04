@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 
 use common_arrow::arrow::datatypes::DataType as ArrowType;
 use common_arrow::arrow::datatypes::Field as ArrowField;
+use common_arrow::arrow::datatypes::TimeUnit;
 use common_exception::Result;
 use dyn_clone::DynClone;
 use enum_dispatch::enum_dispatch;
@@ -40,6 +41,7 @@ use super::type_string::StringType;
 use super::type_struct::StructType;
 use super::type_timestamp::TimestampType;
 use crate::prelude::*;
+use crate::serializations::ConstSerializer;
 
 pub const ARROW_EXTENSION_NAME: &str = "ARROW:extension:databend_name";
 pub const ARROW_EXTENSION_META: &str = "ARROW:extension:databend_metadata";
@@ -73,7 +75,9 @@ pub enum DataTypeImpl {
 }
 
 #[enum_dispatch]
-pub trait DataType: std::fmt::Debug + Sync + Send + DynClone {
+pub trait DataType: std::fmt::Debug + Sync + Send + DynClone
+where Self: Sized
+{
     fn data_type_id(&self) -> TypeID;
 
     fn is_nullable(&self) -> bool {
@@ -99,6 +103,11 @@ pub trait DataType: std::fmt::Debug + Sync + Send + DynClone {
 
     fn default_value(&self) -> DataValue;
 
+    /// Returns a random value of current type.
+    fn random_value(&self) -> DataValue {
+        self.default_value()
+    }
+
     fn can_inside_nullable(&self) -> bool {
         true
     }
@@ -106,6 +115,12 @@ pub trait DataType: std::fmt::Debug + Sync + Send + DynClone {
     fn create_constant_column(&self, data: &DataValue, size: usize) -> Result<ColumnRef>;
 
     fn create_column(&self, data: &[DataValue]) -> Result<ColumnRef>;
+
+    /// Returns a column with `len` random rows.
+    fn create_random_column(&self, len: usize) -> ColumnRef {
+        let data = (0..len).map(|_| self.random_value()).collect::<Vec<_>>();
+        self.create_column(&data).unwrap()
+    }
 
     /// arrow_type did not have nullable sign, it's nullable sign is in the field
     fn arrow_type(&self) -> ArrowType;
@@ -125,7 +140,23 @@ pub trait DataType: std::fmt::Debug + Sync + Send + DynClone {
 
     fn create_mutable(&self, capacity: usize) -> Box<dyn MutableColumn>;
 
-    fn create_serializer(&self) -> TypeSerializerImpl;
+    fn create_serializer<'a>(&self, col: &'a ColumnRef) -> Result<TypeSerializerImpl<'a>> {
+        if col.is_const() {
+            let col: &ConstColumn = Series::check_get(col)?;
+            let inner = Box::new(self.create_serializer_inner(col.inner())?);
+            Ok(ConstSerializer {
+                inner,
+                size: col.len(),
+            }
+            .into())
+        } else {
+            self.create_serializer_inner(col)
+        }
+    }
+
+    fn create_serializer_inner<'a>(&self, _col: &'a ColumnRef) -> Result<TypeSerializerImpl<'a>> {
+        unimplemented!()
+    }
 
     fn create_deserializer(&self, capacity: usize) -> TypeDeserializerImpl;
 }
@@ -146,7 +177,7 @@ pub fn from_arrow_type(dt: &ArrowType) -> DataTypeImpl {
         ArrowType::Float64 => DataTypeImpl::Float64(Float64Type::default()),
 
         // TODO support other list
-        ArrowType::LargeList(f) => {
+        ArrowType::List(f) | ArrowType::LargeList(f) | ArrowType::FixedSizeList(f, _) => {
             let inner = from_arrow_field(f);
             DataTypeImpl::Array(ArrayType::create(inner))
         }
@@ -155,14 +186,27 @@ pub fn from_arrow_type(dt: &ArrowType) -> DataTypeImpl {
             DataTypeImpl::String(StringType::default())
         }
 
-        ArrowType::Timestamp(_, _) => DataTypeImpl::Timestamp(TimestampType::create(0)),
+        ArrowType::Timestamp(TimeUnit::Second, _) => {
+            DataTypeImpl::Timestamp(TimestampType::create(0))
+        }
+        ArrowType::Timestamp(TimeUnit::Millisecond, _) => {
+            DataTypeImpl::Timestamp(TimestampType::create(3))
+        }
+        ArrowType::Timestamp(TimeUnit::Microsecond, _) => {
+            DataTypeImpl::Timestamp(TimestampType::create(6))
+        }
+        // At most precision is 6
+        ArrowType::Timestamp(TimeUnit::Nanosecond, _) => {
+            DataTypeImpl::Timestamp(TimestampType::create(6))
+        }
+
         ArrowType::Date32 | ArrowType::Date64 => DataTypeImpl::Date(DateType::default()),
 
         ArrowType::Struct(fields) => {
             let names = fields.iter().map(|f| f.name.clone()).collect();
             let types = fields.iter().map(from_arrow_field).collect();
 
-            DataTypeImpl::Struct(StructType::create(names, types))
+            DataTypeImpl::Struct(StructType::create(Some(names), types))
         }
         ArrowType::Extension(custom_name, _, _) => match custom_name.as_str() {
             "Variant" => DataTypeImpl::Variant(VariantType::default()),
@@ -183,6 +227,8 @@ pub fn from_arrow_field(f: &ArrowField) -> DataTypeImpl {
         let metadata = f.metadata.get(ARROW_EXTENSION_META).cloned();
         match custom_name.as_str() {
             "Date" => return DateType::new_impl(),
+
+            // OLD COMPATIBLE Behavior
             "Timestamp" => match metadata {
                 Some(meta) => {
                     let mut chars = meta.chars();
@@ -195,6 +241,16 @@ pub fn from_arrow_field(f: &ArrowField) -> DataTypeImpl {
             "Variant" => return VariantType::new_impl(),
             "VariantArray" => return VariantArrayType::new_impl(),
             "VariantObject" => return VariantObjectType::new_impl(),
+            "Tuple" => {
+                let dt = f.data_type();
+                match dt {
+                    ArrowType::Struct(fields) => {
+                        let types = fields.iter().map(from_arrow_field).collect();
+                        return DataTypeImpl::Struct(StructType::create(None, types));
+                    }
+                    _ => unreachable!(),
+                }
+            }
             _ => {}
         }
     }
@@ -239,7 +295,7 @@ pub fn wrap_nullable(data_type: &DataTypeImpl) -> DataTypeImpl {
 
 pub fn remove_nullable(data_type: &DataTypeImpl) -> DataTypeImpl {
     if matches!(data_type.data_type_id(), TypeID::Nullable) {
-        let nullable = data_type.as_any().downcast_ref::<NullableType>().unwrap();
+        let nullable: NullableType = data_type.to_owned().try_into().unwrap();
         return nullable.inner_type().clone();
     }
     data_type.clone()

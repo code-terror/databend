@@ -10,7 +10,7 @@ Analyzing `OnTime` datasets on S3 with Databend step by step.
 
 Make sure you have installed Databend, if not please see:
 
-* [How to Deploy Databend](../00-guides/index.md#deployment)
+* [How to Deploy Databend](../01-guides/index.md#deployment)
 
 ## Step 2. Load OnTime Datasets
 
@@ -35,120 +35,7 @@ See also [How To Create User](../30-reference/30-sql/00-ddl/30-user/01-user-crea
 
 ### 2.2 Create OnTime Table
 
-```sql
-CREATE TABLE ontime
-(
-    Year                            SMALLINT UNSIGNED,
-    Quarter                         TINYINT UNSIGNED,
-    Month                           TINYINT UNSIGNED,
-    DayofMonth                      TINYINT UNSIGNED,
-    DayOfWeek                       TINYINT UNSIGNED,
-    FlightDate                      DATE,
-    Reporting_Airline               VARCHAR,
-    DOT_ID_Reporting_Airline        INT,
-    IATA_CODE_Reporting_Airline     VARCHAR,
-    Tail_Number                     VARCHAR,
-    Flight_Number_Reporting_Airline VARCHAR,
-    OriginAirportID                 INT,
-    OriginAirportSeqID              INT,
-    OriginCityMarketID              INT,
-    Origin                          VARCHAR,
-    OriginCityName                  VARCHAR,
-    OriginState                     VARCHAR,
-    OriginStateFips                 VARCHAR,
-    OriginStateName                 VARCHAR,
-    OriginWac                       INT,
-    DestAirportID                   INT,
-    DestAirportSeqID                INT,
-    DestCityMarketID                INT,
-    Dest                            VARCHAR,
-    DestCityName                    VARCHAR,
-    DestState                       VARCHAR,
-    DestStateFips                   VARCHAR,
-    DestStateName                   VARCHAR,
-    DestWac                         INT,
-    CRSDepTime                      INT,
-    DepTime                         INT,
-    DepDelay                        INT,
-    DepDelayMinutes                 INT,
-    DepDel15                        INT,
-    DepartureDelayGroups            VARCHAR,
-    DepTimeBlk                      VARCHAR,
-    TaxiOut                         INT,
-    WheelsOff                       INT,
-    WheelsOn                        INT,
-    TaxiIn                          INT,
-    CRSArrTime                      INT,
-    ArrTime                         INT,
-    ArrDelay                        INT,
-    ArrDelayMinutes                 INT,
-    ArrDel15                        INT,
-    ArrivalDelayGroups              INT,
-    ArrTimeBlk                      VARCHAR,
-    Cancelled                       TINYINT UNSIGNED,
-    CancellationCode                VARCHAR,
-    Diverted                        TINYINT UNSIGNED,
-    CRSElapsedTime                  INT,
-    ActualElapsedTime               INT,
-    AirTime                         INT,
-    Flights                         INT,
-    Distance                        INT,
-    DistanceGroup                   TINYINT UNSIGNED,
-    CarrierDelay                    INT,
-    WeatherDelay                    INT,
-    NASDelay                        INT,
-    SecurityDelay                   INT,
-    LateAircraftDelay               INT,
-    FirstDepTime                    VARCHAR,
-    TotalAddGTime                   VARCHAR,
-    LongestAddGTime                 VARCHAR,
-    DivAirportLandings              VARCHAR,
-    DivReachedDest                  VARCHAR,
-    DivActualElapsedTime            VARCHAR,
-    DivArrDelay                     VARCHAR,
-    DivDistance                     VARCHAR,
-    Div1Airport                     VARCHAR,
-    Div1AirportID                   INT,
-    Div1AirportSeqID                INT,
-    Div1WheelsOn                    VARCHAR,
-    Div1TotalGTime                  VARCHAR,
-    Div1LongestGTime                VARCHAR,
-    Div1WheelsOff                   VARCHAR,
-    Div1TailNum                     VARCHAR,
-    Div2Airport                     VARCHAR,
-    Div2AirportID                   INT,
-    Div2AirportSeqID                INT,
-    Div2WheelsOn                    VARCHAR,
-    Div2TotalGTime                  VARCHAR,
-    Div2LongestGTime                VARCHAR,
-    Div2WheelsOff                   VARCHAR,
-    Div2TailNum                     VARCHAR,
-    Div3Airport                     VARCHAR,
-    Div3AirportID                   INT,
-    Div3AirportSeqID                INT,
-    Div3WheelsOn                    VARCHAR,
-    Div3TotalGTime                  VARCHAR,
-    Div3LongestGTime                VARCHAR,
-    Div3WheelsOff                   VARCHAR,
-    Div3TailNum                     VARCHAR,
-    Div4Airport                     VARCHAR,
-    Div4AirportID                   INT,
-    Div4AirportSeqID                INT,
-    Div4WheelsOn                    VARCHAR,
-    Div4TotalGTime                  VARCHAR,
-    Div4LongestGTime                VARCHAR,
-    Div4WheelsOff                   VARCHAR,
-    Div4TailNum                     VARCHAR,
-    Div5Airport                     VARCHAR,
-    Div5AirportID                   INT,
-    Div5AirportSeqID                INT,
-    Div5WheelsOn                    VARCHAR,
-    Div5TotalGTime                  VARCHAR,
-    Div5LongestGTime                VARCHAR,
-    Div5WheelsOff                   VARCHAR,
-    Div5TailNum                     VARCHAR
-);
-```
+[Create SQL](https://github.com/datafuselabs/databend/blob/main/tests/suites/1_stateful/ddl/ontime.sql)
 
 ### 2.3 Load Data Into OnTime Table
 
@@ -160,17 +47,17 @@ wget --no-check-certificate https://repo.databend.rs/t_ontime/t_ontime.csv.zip
 unzip t_ontime.csv.zip
 ```
 
-```shell title='Load CSV files into Databend'
-ls *.csv|xargs -I{} echo  curl -H \"insert_sql:insert into ontime format CSV\" -H \"skip_header:0\" -H \"field_delimiter:\t\"  -F  \"upload=@{}\"  -XPUT http://user1:abc123@127.0.0.1:8081/v1/streaming_load |bash
+```shell title='Load TSV files into Databend'
+curl -H "insert_sql:insert into ontime format TSV" -H "skip_header:0" -F "upload=@t_ontime.csv"  -XPUT http://root:@127.0.0.1:8000/v1/streaming_load
 ```
 
 :::tip
 
-* http://user1:abc123@127.0.0.1:8081/v1/streaming_load
-    * `user1` is the user.
-    * `abc123` is the user password.
+* `http://username:passowrd@127.0.0.1:8000/v1/streaming_load`
+    * `username` is the user.
+    * `password` is the user password.
     * `127.0.0.1` is `http_handler_host` value in your *databend-query.toml*
-    * `8081` is `http_handler_port` value in your *databend-query.toml*
+    * `8000` is `http_handler_port` value in your *databend-query.toml*
 :::
 
 ## Step 3. Queries

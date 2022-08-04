@@ -19,9 +19,9 @@ use logos::Logos;
 use logos::Span;
 
 pub use self::TokenKind::*;
-use crate::parser::error::DisplayError;
+use crate::DisplayError;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Token<'a> {
     pub source: &'a str,
     pub kind: TokenKind,
@@ -114,13 +114,20 @@ pub enum TokenKind {
     #[regex(r#"'([^'\\]|\\.|'')*'"#)]
     QuotedString,
 
+    #[regex(r#"@([^\s`;'"])+"#)]
+    AtString,
+
     #[regex(r"[xX]'[a-fA-F0-9]*'")]
-    LiteralHex,
+    PGLiteralHex,
+    #[regex(r"0[xX][a-fA-F0-9]+")]
+    MySQLLiteralHex,
 
     #[regex(r"[0-9]+")]
+    LiteralInteger,
+
     #[regex(r"[0-9]+e[+-]?[0-9]+")]
     #[regex(r"([0-9]*\.[0-9]+(e[+-]?[0-9]+)?)|([0-9]+\.[0-9]*(e[+-]?[0-9]+)?)")]
-    LiteralNumber,
+    LiteralFloat,
 
     // Symbols
     #[token("==")]
@@ -230,6 +237,10 @@ pub enum TokenKind {
     //    reserved list.
     #[token("ALL", ignore(ascii_case))]
     ALL,
+    #[token("ANY", ignore(ascii_case))]
+    ANY,
+    #[token("SOME", ignore(ascii_case))]
+    SOME,
     #[token("ALTER", ignore(ascii_case))]
     ALTER,
     #[token("ANALYZE", ignore(ascii_case))]
@@ -240,6 +251,8 @@ pub enum TokenKind {
     ARRAY,
     #[token("AS", ignore(ascii_case))]
     AS,
+    #[token("AT", ignore(ascii_case))]
+    AT,
     #[token("ASC", ignore(ascii_case))]
     ASC,
     #[token("AWS_KEY_ID", ignore(ascii_case))]
@@ -258,6 +271,8 @@ pub enum TokenKind {
     BOTH,
     #[token("BY", ignore(ascii_case))]
     BY,
+    #[token("CALL", ignore(ascii_case))]
+    CALL,
     #[token("CASE", ignore(ascii_case))]
     CASE,
     #[token("CAST", ignore(ascii_case))]
@@ -268,12 +283,18 @@ pub enum TokenKind {
     CLUSTER,
     #[token("COMMENT", ignore(ascii_case))]
     COMMENT,
+    #[token("COMMENTS", ignore(ascii_case))]
+    COMMENTS,
     #[token("COMPACT", ignore(ascii_case))]
     COMPACT,
     #[token("CONFIGRELOAD", ignore(ascii_case))]
     CONFIGRELOAD,
     #[token("CONNECTION", ignore(ascii_case))]
     CONNECTION,
+    #[token("CHAR", ignore(ascii_case))]
+    CHAR,
+    #[token("CHARACTER", ignore(ascii_case))]
+    CHARACTER,
     #[token("COPY_OPTIONS", ignore(ascii_case))]
     COPY_OPTIONS,
     #[token("COPY", ignore(ascii_case))]
@@ -284,6 +305,8 @@ pub enum TokenKind {
     CREATE,
     #[token("CREDENTIALS", ignore(ascii_case))]
     CREDENTIALS,
+    #[token("CROSS", ignore(ascii_case))]
+    CROSS,
     #[token("CSV", ignore(ascii_case))]
     CSV,
     #[token("CURRENT_TIMESTAMP", ignore(ascii_case))]
@@ -296,6 +319,10 @@ pub enum TokenKind {
     DATE,
     #[token("DATE_ADD", ignore(ascii_case))]
     DATE_ADD,
+    #[token("DATE_SUB", ignore(ascii_case))]
+    DATE_SUB,
+    #[token("DATE_TRUNC", ignore(ascii_case))]
+    DATE_TRUNC,
     #[token("DATETIME", ignore(ascii_case))]
     DATETIME,
     #[token("DAY", ignore(ascii_case))]
@@ -304,6 +331,8 @@ pub enum TokenKind {
     DECADE,
     #[token("DEFAULT", ignore(ascii_case))]
     DEFAULT,
+    #[token("DELETE", ignore(ascii_case))]
+    DELETE,
     #[token("DESC", ignore(ascii_case))]
     DESC,
     #[token("DESCRIBE", ignore(ascii_case))]
@@ -320,26 +349,38 @@ pub enum TokenKind {
     DOW,
     #[token("DOY", ignore(ascii_case))]
     DOY,
+    #[token("DOWNLOAD", ignore(ascii_case))]
+    DOWNLOAD,
     #[token("DROP", ignore(ascii_case))]
     DROP,
+    #[token("EXCEPT", ignore(ascii_case))]
+    EXCEPT,
     #[token("ELSE", ignore(ascii_case))]
     ELSE,
     #[token("END", ignore(ascii_case))]
     END,
     #[token("ENDPOINT_URL", ignore(ascii_case))]
     ENDPOINT_URL,
+    #[token("ENCRYPTION", ignore(ascii_case))]
+    ENCRYPTION,
     #[token("ENGINE", ignore(ascii_case))]
     ENGINE,
+    #[token("ENGINES", ignore(ascii_case))]
+    ENGINES,
     #[token("EPOCH", ignore(ascii_case))]
     EPOCH,
     #[token("EXISTS", ignore(ascii_case))]
     EXISTS,
     #[token("EXPLAIN", ignore(ascii_case))]
     EXPLAIN,
+    #[token("EXPIRE", ignore(ascii_case))]
+    EXPIRE,
     #[token("EXTRACT", ignore(ascii_case))]
     EXTRACT,
     #[token("FALSE", ignore(ascii_case))]
     FALSE,
+    #[token("FIELDS", ignore(ascii_case))]
+    FIELDS,
     #[token("FIELD_DELIMITER", ignore(ascii_case))]
     FIELD_DELIMITER,
     #[token("FILE_FORMAT", ignore(ascii_case))]
@@ -356,6 +397,8 @@ pub enum TokenKind {
     FOR,
     #[token("FORMAT", ignore(ascii_case))]
     FORMAT,
+    #[token("FRAGMENTS", ignore(ascii_case))]
+    FRAGMENTS,
     #[token("FROM", ignore(ascii_case))]
     FROM,
     #[token("FULL", ignore(ascii_case))]
@@ -368,14 +411,20 @@ pub enum TokenKind {
     FUSE,
     #[token("GITHUB", ignore(ascii_case))]
     GITHUB,
+    #[token("GLOBAL", ignore(ascii_case))]
+    GLOBAL,
     #[token("GRAPH", ignore(ascii_case))]
     GRAPH,
     #[token("GROUP", ignore(ascii_case))]
     GROUP,
     #[token("HAVING", ignore(ascii_case))]
     HAVING,
+    #[token("HISTORY", ignore(ascii_case))]
+    HISTORY,
     #[token("HOUR", ignore(ascii_case))]
     HOUR,
+    #[token("INTERSECT", ignore(ascii_case))]
+    INTERSECT,
     #[token("IDENTIFIED", ignore(ascii_case))]
     IDENTIFIED,
     #[token("IF", ignore(ascii_case))]
@@ -416,8 +465,12 @@ pub enum TokenKind {
     JULIAN,
     #[token("JWT", ignore(ascii_case))]
     JWT,
+    #[token("KEY", ignore(ascii_case))]
+    KEY,
     #[token("KILL", ignore(ascii_case))]
     KILL,
+    #[token("ROLES", ignore(ascii_case))]
+    ROLES,
     #[token("LEADING", ignore(ascii_case))]
     LEADING,
     #[token("LEFT", ignore(ascii_case))]
@@ -430,6 +483,8 @@ pub enum TokenKind {
     LIST,
     #[token("MAP", ignore(ascii_case))]
     MAP,
+    #[token("MASTER_KEY", ignore(ascii_case))]
+    MASTER_KEY,
     #[token("MEMORY", ignore(ascii_case))]
     MEMORY,
     #[token("METRICS", ignore(ascii_case))]
@@ -470,6 +525,8 @@ pub enum TokenKind {
     ORDER,
     #[token("OUTER", ignore(ascii_case))]
     OUTER,
+    #[token("ON_ERROR", ignore(ascii_case))]
+    ON_ERROR,
     #[token("OVERWRITE", ignore(ascii_case))]
     OVERWRITE,
     #[token("PARQUET", ignore(ascii_case))]
@@ -496,6 +553,20 @@ pub enum TokenKind {
     REGEXP,
     #[token("RENAME", ignore(ascii_case))]
     RENAME,
+    #[token("GRANT", ignore(ascii_case))]
+    GRANT,
+    #[token("ROLE", ignore(ascii_case))]
+    ROLE,
+    #[token("PRESIGN", ignore(ascii_case))]
+    PRESIGN,
+    #[token("PRIVILEGES", ignore(ascii_case))]
+    PRIVILEGES,
+    #[token("REMOVE", ignore(ascii_case))]
+    REMOVE,
+    #[token("REVOKE", ignore(ascii_case))]
+    REVOKE,
+    #[token("GRANTS", ignore(ascii_case))]
+    GRANTS,
     #[token("RIGHT", ignore(ascii_case))]
     RIGHT,
     #[token("RLIKE", ignore(ascii_case))]
@@ -512,6 +583,8 @@ pub enum TokenKind {
     SET,
     #[token("SETTINGS", ignore(ascii_case))]
     SETTINGS,
+    #[token("STAGES", ignore(ascii_case))]
+    STAGES,
     #[token("SHA256_PASSWORD", ignore(ascii_case))]
     SHA256_PASSWORD,
     #[token("SHOW", ignore(ascii_case))]
@@ -524,8 +597,18 @@ pub enum TokenKind {
     SKIP_HEADER,
     #[token("SMALLINT", ignore(ascii_case))]
     SMALLINT,
+    #[token("SNAPSHOT", ignore(ascii_case))]
+    SNAPSHOT,
     #[token("STAGE", ignore(ascii_case))]
     STAGE,
+    #[token("USAGE", ignore(ascii_case))]
+    USAGE,
+    #[token("UPDATE", ignore(ascii_case))]
+    UPDATE,
+    #[token("UPLOAD", ignore(ascii_case))]
+    UPLOAD,
+    #[token("SUPER", ignore(ascii_case))]
+    SUPER,
     #[token("STATUS", ignore(ascii_case))]
     STATUS,
     #[token("STRING", ignore(ascii_case))]
@@ -536,6 +619,8 @@ pub enum TokenKind {
     TABLE,
     #[token("TABLES", ignore(ascii_case))]
     TABLES,
+    #[token("TEXT", ignore(ascii_case))]
+    TEXT,
     #[token("TENANTSETTING", ignore(ascii_case))]
     TENANTSETTING,
     #[token("THEN", ignore(ascii_case))]
@@ -552,8 +637,12 @@ pub enum TokenKind {
     TINYINT,
     #[token("TO", ignore(ascii_case))]
     TO,
+    #[token("TOKEN", ignore(ascii_case))]
+    TOKEN,
     #[token("TRAILING", ignore(ascii_case))]
     TRAILING,
+    #[token("TRANSIENT", ignore(ascii_case))]
+    TRANSIENT,
     #[token("TRIM", ignore(ascii_case))]
     TRIM,
     #[token("TRUE", ignore(ascii_case))]
@@ -562,8 +651,12 @@ pub enum TokenKind {
     TRUNCATE,
     #[token("TRY_CAST", ignore(ascii_case))]
     TRY_CAST,
+    #[token("TUPLE", ignore(ascii_case))]
+    TUPLE,
     #[token("TYPE", ignore(ascii_case))]
     TYPE,
+    #[token("UNION", ignore(ascii_case))]
+    UNION,
     #[token("UINT16", ignore(ascii_case))]
     UINT16,
     #[token("UINT32", ignore(ascii_case))]
@@ -572,6 +665,8 @@ pub enum TokenKind {
     UINT64,
     #[token("UINT8", ignore(ascii_case))]
     UINT8,
+    #[token("UNDROP", ignore(ascii_case))]
+    UNDROP,
     #[token("UNSIGNED", ignore(ascii_case))]
     UNSIGNED,
     #[token("URL", ignore(ascii_case))]
@@ -580,10 +675,14 @@ pub enum TokenKind {
     USE,
     #[token("USER", ignore(ascii_case))]
     USER,
+    #[token("USERS", ignore(ascii_case))]
+    USERS,
     #[token("USING", ignore(ascii_case))]
     USING,
     #[token("VALUES", ignore(ascii_case))]
     VALUES,
+    #[token("VALIDATION_MODE", ignore(ascii_case))]
+    VALIDATION_MODE,
     #[token("VARCHAR", ignore(ascii_case))]
     VARCHAR,
     #[token("VARIANT", ignore(ascii_case))]
@@ -602,6 +701,20 @@ pub enum TokenKind {
     XOR,
     #[token("YEAR", ignore(ascii_case))]
     YEAR,
+    #[token("NULLIF", ignore(ascii_case))]
+    NULLIF,
+    #[token("COALESCE", ignore(ascii_case))]
+    COALESCE,
+    #[token("RANDOM", ignore(ascii_case))]
+    RANDOM,
+    #[token("IFNULL", ignore(ascii_case))]
+    IFNULL,
+    #[token("NULLS", ignore(ascii_case))]
+    NULLS,
+    #[token("FIRST", ignore(ascii_case))]
+    FIRST,
+    #[token("LAST", ignore(ascii_case))]
+    LAST,
 }
 
 // Reference: https://www.postgresql.org/docs/current/sql-keywords-appendix.html
@@ -611,8 +724,10 @@ impl TokenKind {
             self,
             Ident
                 | QuotedString
-                | LiteralHex
-                | LiteralNumber
+                | PGLiteralHex
+                | MySQLLiteralHex
+                | LiteralInteger
+                | LiteralFloat
                 | DoubleEq
                 | Eq
                 | NotEq
@@ -666,7 +781,7 @@ impl TokenKind {
             // | TokenKind::ANALYSE
             | TokenKind::ANALYZE
             | TokenKind::AND
-            // | TokenKind::ANY
+            | TokenKind::ANY
             | TokenKind::ASC
             // | TokenKind::ASYMMETRIC
             | TokenKind::BETWEEN
@@ -677,7 +792,7 @@ impl TokenKind {
             | TokenKind::CASE
             | TokenKind::CAST
             // | TokenKind::CHECK
-            // | TokenKind::COALESCE
+            | TokenKind::COALESCE
             // | TokenKind::COLLATE
             // | TokenKind::COLUMN
             // | TokenKind::CONSTRAINT
@@ -703,6 +818,7 @@ impl TokenKind {
             // | TokenKind::FOREIGN
             // | TokenKind::GREATEST
             // | TokenKind::GROUPING
+            | TokenKind::IFNULL
             | TokenKind::IN
             // | TokenKind::INITIALLY
             // | TokenKind::INOUT
@@ -720,7 +836,7 @@ impl TokenKind {
             // | TokenKind::NORMALIZE
             | TokenKind::NOT
             | TokenKind::NULL
-            // | TokenKind::NULLIF
+            | TokenKind::NULLIF
             // | TokenKind::NUMERIC
             // | TokenKind::ONLY
             | TokenKind::OR
@@ -736,7 +852,7 @@ impl TokenKind {
             // | TokenKind::SESSION_USER
             // | TokenKind::SETOF
             | TokenKind::SMALLINT
-            // | TokenKind::SOME
+            | TokenKind::SOME
             | TokenKind::SUBSTRING
             // | TokenKind::SYMMETRIC
             | TokenKind::TABLE
@@ -749,7 +865,7 @@ impl TokenKind {
             | TokenKind::TRUE
             | TokenKind::TRY_CAST
             // | TokenKind::UNIQUE
-            | TokenKind::USER
+            //| TokenKind::USER
             | TokenKind::USING
             | TokenKind::VALUES
             | TokenKind::VARCHAR
@@ -769,16 +885,16 @@ impl TokenKind {
             | TokenKind::ARRAY
             | TokenKind::AS
             // | TokenKind::CHAR
-            // | TokenKind::CHARACTER
+            | TokenKind::CHARACTER
             | TokenKind::CREATE
-            // | TokenKind::EXCEPT
+            | TokenKind::EXCEPT
             // | TokenKind::FETCH
             | TokenKind::FOR
             | TokenKind::FROM
             // | TokenKind::GRANT
             | TokenKind::GROUP
             | TokenKind::HAVING
-            // | TokenKind::INTERSECT
+            | TokenKind::INTERSECT
             | TokenKind::INTO
             | TokenKind::LIMIT
             | TokenKind::OFFSET
@@ -787,11 +903,13 @@ impl TokenKind {
             // | TokenKind::PRECISION
             // | TokenKind::RETURNING
             | TokenKind::TO
-            // | TokenKind::UNION
+            | TokenKind::UNION
             | TokenKind::WHERE
             // | TokenKind::WINDOW
             | TokenKind::WITH
             | TokenKind::DATE_ADD
+            | TokenKind::DATE_SUB
+            | TokenKind::DATE_TRUNC
             if !after_as => true,
             _ => false
         }
@@ -803,7 +921,7 @@ impl TokenKind {
             // | TokenKind::ANALYSE
             | TokenKind::ANALYZE
             | TokenKind::AND
-            // | TokenKind::ANY
+            | TokenKind::ANY
             | TokenKind::ASC
             // | TokenKind::ASYMMETRIC
             // | TokenKind::AUTHORIZATION
@@ -817,7 +935,7 @@ impl TokenKind {
             // | TokenKind::COLUMN
             // | TokenKind::CONCURRENTLY
             // | TokenKind::CONSTRAINT
-            // | TokenKind::CROSS
+            | TokenKind::CROSS
             // | TokenKind::CURRENT_CATALOG
             // | TokenKind::CURRENT_DATE
             // | TokenKind::CURRENT_ROLE
@@ -860,15 +978,15 @@ impl TokenKind {
             | TokenKind::SELECT
             // | TokenKind::SESSION_USER
             // | TokenKind::SIMILAR
-            // | TokenKind::SOME
+            | TokenKind::SOME
             // | TokenKind::SYMMETRIC
-            | TokenKind::TABLE
+            // | TokenKind::TABLE
             // | TokenKind::TABLESAMPLE
             | TokenKind::THEN
             | TokenKind::TRAILING
             | TokenKind::TRUE
             // | TokenKind::UNIQUE
-            | TokenKind::USER
+            //| TokenKind::USER
             | TokenKind::USING
             // | TokenKind::VARIADIC
             // | TokenKind::VERBOSE
@@ -876,14 +994,14 @@ impl TokenKind {
             | TokenKind::ARRAY
             | TokenKind::AS
             | TokenKind::CREATE
-            // | TokenKind::EXCEPT
+            | TokenKind::EXCEPT
             // | TokenKind::FETCH
             | TokenKind::FOR
             | TokenKind::FROM
             // | TokenKind::GRANT
             | TokenKind::GROUP
             | TokenKind::HAVING
-            // | TokenKind::INTERSECT
+            | TokenKind::INTERSECT
             | TokenKind::INTO
             // | TokenKind::ISNULL
             | TokenKind::LIMIT
@@ -892,10 +1010,11 @@ impl TokenKind {
             | TokenKind::OFFSET
             | TokenKind::ON
             | TokenKind::ORDER
-            // | TokenKind::OVERLAPS 
+            // | TokenKind::OVERLAPS
             // | TokenKind::RETURNING
+            | TokenKind::STAGE
             | TokenKind::TO
-            // | TokenKind::UNION
+            | TokenKind::UNION
             | TokenKind::WHERE
             // | TokenKind::WINDOW
             | TokenKind::WITH

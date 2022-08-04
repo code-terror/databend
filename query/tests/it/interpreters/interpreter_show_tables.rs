@@ -15,227 +15,128 @@
 use common_base::base::tokio;
 use common_exception::Result;
 use databend_query::interpreters::*;
-use databend_query::sql::PlanParser;
+use databend_query::sql::Planner;
 use futures::TryStreamExt;
 use pretty_assertions::assert_eq;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_show_tables_interpreter() -> Result<()> {
     let ctx = crate::tests::create_query_context().await?;
+    let mut planner = Planner::new(ctx.clone());
 
     // Setup.
     {
         // Create database.
         {
-            let plan = PlanParser::parse(ctx.clone(), "create database db1").await?;
-            let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-            let _ = executor.execute(None).await?;
+            let query = "create database db1";
+            let (plan, _, _) = planner.plan_sql(query).await?;
+            let executor = InterpreterFactoryV2::get(ctx.clone(), &plan)?;
+            let _ = executor.execute().await?;
         }
 
         // Use database.
         {
-            let plan = PlanParser::parse(ctx.clone(), "use db1").await?;
-            let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-            let _ = executor.execute(None).await?;
+            let query = "use db1";
+            let (plan, _, _) = planner.plan_sql(query).await?;
+            let executor = InterpreterFactoryV2::get(ctx.clone(), &plan)?;
+            let _ = executor.execute().await?;
         }
 
         // Create table.
         {
-            let plan = PlanParser::parse(ctx.clone(), "create table data(a Int)").await?;
-            let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-            let _ = executor.execute(None).await?;
+            let query = "create table data(a Int)";
+            let (plan, _, _) = planner.plan_sql(query).await?;
+            let executor = InterpreterFactoryV2::get(ctx.clone(), &plan)?;
+            let _ = executor.execute().await?;
         }
         {
-            let plan = PlanParser::parse(ctx.clone(), "create table bend(a Int)").await?;
-            let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-            let _ = executor.execute(None).await?;
+            let query = "create table bend(a Int)";
+            let (plan, _, _) = planner.plan_sql(query).await?;
+            let executor = InterpreterFactoryV2::get(ctx.clone(), &plan)?;
+            let _ = executor.execute().await?;
         }
     }
 
     // show tables.
     {
-        let plan = PlanParser::parse(ctx.clone(), "show tables").await?;
-        let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-        assert_eq!(executor.name(), "ShowTablesInterpreter");
-        let stream = executor.execute(None).await?;
+        let query = "show tables";
+        let (plan, _, _) = planner.plan_sql(query).await?;
+        let executor = InterpreterFactoryV2::get(ctx.clone(), &plan)?;
+        assert_eq!(executor.name(), "SelectInterpreterV2");
+        let stream = executor.execute().await?;
         let result = stream.try_collect::<Vec<_>>().await?;
         let expected = vec![
             "+---------------+",
-            "| Tables_in_db1 |",
+            "| tables_in_db1 |",
             "+---------------+",
             "| bend          |",
             "| data          |",
             "+---------------+",
-        ];
-        common_datablocks::assert_blocks_sorted_eq(expected, result.as_slice());
-    }
-
-    // show full tables.
-    {
-        let plan = PlanParser::parse(ctx.clone(), "show full tables").await?;
-        let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-        assert_eq!(executor.name(), "ShowTablesInterpreter");
-        let stream = executor.execute(None).await?;
-        let result = stream.try_collect::<Vec<_>>().await?;
-        let expected = vec![
-            "+---------------+------------+---------------+--------+-------------------------------+----------+-----------+----------------------+------------+",
-            "| Tables_in_db1 | Table_type | table_catalog | engine | create_time                   | num_rows | data_size | data_compressed_size | index_size |",
-            "+---------------+------------+---------------+--------+-------------------------------+----------+-----------+----------------------+------------+",
-            "| bend          | BASE TABLE | db1           | FUSE   | 1970-01-01 00:00:00.000 +0000 | 0        | 0         | 0                    | NULL       |",
-            "| data          | BASE TABLE | db1           | FUSE   | 1970-01-01 00:00:00.000 +0000 | 0        | 0         | 0                    | NULL       |",
-            "+---------------+------------+---------------+--------+-------------------------------+----------+-----------+----------------------+------------+",
         ];
         common_datablocks::assert_blocks_sorted_eq(expected, result.as_slice());
     }
 
     // show tables like '%da%'.
     {
-        let plan = PlanParser::parse(ctx.clone(), "show tables like '%da%'").await?;
-        let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-        assert_eq!(executor.name(), "ShowTablesInterpreter");
-        let stream = executor.execute(None).await?;
+        let query = "show tables like '%da%'";
+        let (plan, _, _) = planner.plan_sql(query).await?;
+        let executor = InterpreterFactoryV2::get(ctx.clone(), &plan)?;
+        assert_eq!(executor.name(), "SelectInterpreterV2");
+        let stream = executor.execute().await?;
         let result = stream.try_collect::<Vec<_>>().await?;
         let expected = vec![
             "+---------------+",
-            "| Tables_in_db1 |",
+            "| tables_in_db1 |",
             "+---------------+",
             "| data          |",
             "+---------------+",
-        ];
-        common_datablocks::assert_blocks_sorted_eq(expected, result.as_slice());
-    }
-
-    // show full tables like '%da%'.
-    {
-        let plan = PlanParser::parse(ctx.clone(), "show full tables like '%da%'").await?;
-        let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-        assert_eq!(executor.name(), "ShowTablesInterpreter");
-        let stream = executor.execute(None).await?;
-        let result = stream.try_collect::<Vec<_>>().await?;
-        let expected = vec![
-            "+---------------+------------+---------------+--------+-------------------------------+----------+-----------+----------------------+------------+",
-            "| Tables_in_db1 | Table_type | table_catalog | engine | create_time                   | num_rows | data_size | data_compressed_size | index_size |",
-            "+---------------+------------+---------------+--------+-------------------------------+----------+-----------+----------------------+------------+",
-            "| data          | BASE TABLE | db1           | FUSE   | 1970-01-01 00:00:00.000 +0000 | 0        | 0         | 0                    | NULL       |",
-            "+---------------+------------+---------------+--------+-------------------------------+----------+-----------+----------------------+------------+",
         ];
         common_datablocks::assert_blocks_sorted_eq(expected, result.as_slice());
     }
 
     // show tables != 'data'.
     {
-        let plan = PlanParser::parse(ctx.clone(), "show tables where table_name != 'data'").await?;
-        let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-        assert_eq!(executor.name(), "ShowTablesInterpreter");
-        let stream = executor.execute(None).await?;
+        let query = "show tables where name != 'data'";
+        let (plan, _, _) = planner.plan_sql(query).await?;
+        let executor = InterpreterFactoryV2::get(ctx.clone(), &plan)?;
+        assert_eq!(executor.name(), "SelectInterpreterV2");
+        let stream = executor.execute().await?;
         let result = stream.try_collect::<Vec<_>>().await?;
         let expected = vec![
             "+---------------+",
-            "| Tables_in_db1 |",
+            "| tables_in_db1 |",
             "+---------------+",
             "| bend          |",
             "+---------------+",
-        ];
-        common_datablocks::assert_blocks_sorted_eq(expected, result.as_slice());
-    }
-
-    // show full tables != 'data'.
-    {
-        let plan =
-            PlanParser::parse(ctx.clone(), "show full tables where table_name != 'data'").await?;
-        let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-        assert_eq!(executor.name(), "ShowTablesInterpreter");
-        let stream = executor.execute(None).await?;
-        let result = stream.try_collect::<Vec<_>>().await?;
-        let expected = vec![
-            "+---------------+------------+---------------+--------+-------------------------------+----------+-----------+----------------------+------------+",
-            "| Tables_in_db1 | Table_type | table_catalog | engine | create_time                   | num_rows | data_size | data_compressed_size | index_size |",
-            "+---------------+------------+---------------+--------+-------------------------------+----------+-----------+----------------------+------------+",
-            "| bend          | BASE TABLE | db1           | FUSE   | 1970-01-01 00:00:00.000 +0000 | 0        | 0         | 0                    | NULL       |",
-            "+---------------+------------+---------------+--------+-------------------------------+----------+-----------+----------------------+------------+",
         ];
         common_datablocks::assert_blocks_sorted_eq(expected, result.as_slice());
     }
 
     // show tables from db1.
     {
-        let plan = PlanParser::parse(ctx.clone(), "show tables from db1").await?;
-        let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-        assert_eq!(executor.name(), "ShowTablesInterpreter");
-        let stream = executor.execute(None).await?;
+        let query = "show tables from db1";
+        let (plan, _, _) = planner.plan_sql(query).await?;
+        let executor = InterpreterFactoryV2::get(ctx.clone(), &plan)?;
+        assert_eq!(executor.name(), "SelectInterpreterV2");
+        let stream = executor.execute().await?;
         let result = stream.try_collect::<Vec<_>>().await?;
         let expected = vec![
             "+---------------+",
-            "| Tables_in_db1 |",
+            "| tables_in_db1 |",
             "+---------------+",
             "| bend          |",
             "| data          |",
             "+---------------+",
-        ];
-        common_datablocks::assert_blocks_sorted_eq(expected, result.as_slice());
-    }
-
-    // show full tables from db1.
-    {
-        let plan = PlanParser::parse(ctx.clone(), "show full tables from db1").await?;
-        let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-        assert_eq!(executor.name(), "ShowTablesInterpreter");
-        let stream = executor.execute(None).await?;
-        let result = stream.try_collect::<Vec<_>>().await?;
-        let expected = vec![
-            "+---------------+------------+---------------+--------+-------------------------------+----------+-----------+----------------------+------------+",
-            "| Tables_in_db1 | Table_type | table_catalog | engine | create_time                   | num_rows | data_size | data_compressed_size | index_size |",
-            "+---------------+------------+---------------+--------+-------------------------------+----------+-----------+----------------------+------------+",
-            "| bend          | BASE TABLE | db1           | FUSE   | 1970-01-01 00:00:00.000 +0000 | 0        | 0         | 0                    | NULL       |",
-            "| data          | BASE TABLE | db1           | FUSE   | 1970-01-01 00:00:00.000 +0000 | 0        | 0         | 0                    | NULL       |",
-            "+---------------+------------+---------------+--------+-------------------------------+----------+-----------+----------------------+------------+",
-        ];
-        common_datablocks::assert_blocks_sorted_eq(expected, result.as_slice());
-    }
-
-    // show tables in db1.
-    {
-        let plan = PlanParser::parse(ctx.clone(), "show tables in db1").await?;
-        let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-        assert_eq!(executor.name(), "ShowTablesInterpreter");
-        let stream = executor.execute(None).await?;
-        let result = stream.try_collect::<Vec<_>>().await?;
-
-        let expected = vec![
-            "+---------------+",
-            "| Tables_in_db1 |",
-            "+---------------+",
-            "| bend          |",
-            "| data          |",
-            "+---------------+",
-        ];
-        common_datablocks::assert_blocks_sorted_eq(expected, result.as_slice());
-    }
-
-    // show full tables in db1.
-    {
-        let plan = PlanParser::parse(ctx.clone(), "show full tables in db1").await?;
-        let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-        assert_eq!(executor.name(), "ShowTablesInterpreter");
-        let stream = executor.execute(None).await?;
-        let result = stream.try_collect::<Vec<_>>().await?;
-
-        let expected = vec![
-            "+---------------+------------+---------------+--------+-------------------------------+----------+-----------+----------------------+------------+",
-            "| Tables_in_db1 | Table_type | table_catalog | engine | create_time                   | num_rows | data_size | data_compressed_size | index_size |",
-            "+---------------+------------+---------------+--------+-------------------------------+----------+-----------+----------------------+------------+",
-            "| bend          | BASE TABLE | db1           | FUSE   | 1970-01-01 00:00:00.000 +0000 | 0        | 0         | 0                    | NULL       |",
-            "| data          | BASE TABLE | db1           | FUSE   | 1970-01-01 00:00:00.000 +0000 | 0        | 0         | 0                    | NULL       |",
-            "+---------------+------------+---------------+--------+-------------------------------+----------+-----------+----------------------+------------+",
         ];
         common_datablocks::assert_blocks_sorted_eq(expected, result.as_slice());
     }
 
     // Teardown.
     {
-        let plan = PlanParser::parse(ctx.clone(), "drop database db1").await?;
-        let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
-        let _ = executor.execute(None).await?;
+        let query = "drop database db1";
+        let (plan, _, _) = planner.plan_sql(query).await?;
+        let executor = InterpreterFactoryV2::get(ctx.clone(), &plan)?;
+        let _ = executor.execute().await?;
     }
 
     Ok(())

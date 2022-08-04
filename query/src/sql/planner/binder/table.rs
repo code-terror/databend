@@ -17,22 +17,32 @@ use std::sync::Arc;
 use common_ast::ast::Indirection;
 use common_ast::ast::SelectStmt;
 use common_ast::ast::SelectTarget;
+use common_ast::ast::Statement;
 use common_ast::ast::TableReference;
-use common_ast::parser::error::DisplayError;
+use common_ast::ast::TimeTravelPoint;
+use common_ast::parser::parse_sql;
+use common_ast::parser::tokenize_sql;
+use common_ast::Backtrace;
+use common_ast::DisplayError;
+use common_datavalues::prelude::*;
 use common_exception::ErrorCode;
 use common_exception::Result;
 use common_planners::Expression;
 
 use crate::catalogs::CATALOG_DEFAULT;
+use crate::sessions::TableContext;
 use crate::sql::binder::scalar::ScalarBinder;
 use crate::sql::binder::Binder;
 use crate::sql::binder::ColumnBinding;
 use crate::sql::optimizer::SExpr;
+use crate::sql::planner::semantic::TypeChecker;
 use crate::sql::plans::ConstantExpr;
 use crate::sql::plans::LogicalGet;
 use crate::sql::plans::Scalar;
 use crate::sql::BindContext;
 use crate::sql::IndexType;
+use crate::storages::view::view_table::QUERY;
+use crate::storages::NavigationPoint;
 use crate::storages::Table;
 use crate::storages::ToReadDataSourcePlan;
 use crate::table_functions::TableFunction;
@@ -58,7 +68,7 @@ impl<'a> Binder {
         let database = "system";
         let tenant = self.ctx.get_tenant();
         let table_meta: Arc<dyn Table> = self
-            .resolve_data_source(tenant.as_str(), catalog, database, "one")
+            .resolve_data_source(tenant.as_str(), catalog, database, "one", &None)
             .await?;
         let source = table_meta.read_plan(self.ctx.clone(), None).await?;
         let table_index = self.metadata.write().add_table(
@@ -68,20 +78,22 @@ impl<'a> Binder {
             source,
         );
 
-        self.bind_base_table(bind_context, table_index)
+        self.bind_base_table(bind_context, database, table_index)
     }
 
     pub(super) async fn bind_table_reference(
         &mut self,
         bind_context: &BindContext,
-        stmt: &TableReference<'a>,
+        table_ref: &TableReference<'a>,
     ) -> Result<(SExpr, BindContext)> {
-        match stmt {
+        match table_ref {
             TableReference::Table {
+                span: _,
                 catalog,
                 database,
                 table,
                 alias,
+                travel_point,
             } => {
                 // Get catalog name
                 let catalog = catalog
@@ -101,6 +113,11 @@ impl<'a> Binder {
                 let table = table.to_lowercase();
                 let tenant = self.ctx.get_tenant();
 
+                let navigation_point = match travel_point {
+                    Some(tp) => Some(self.resolve_data_travel_point(bind_context, tp).await?),
+                    None => None,
+                };
+
                 // Resolve table with catalog
                 let table_meta: Arc<dyn Table> = self
                     .resolve_data_source(
@@ -108,21 +125,49 @@ impl<'a> Binder {
                         catalog.as_str(),
                         database.as_str(),
                         table.as_str(),
+                        &navigation_point,
                     )
                     .await?;
-                let source = table_meta.read_plan(self.ctx.clone(), None).await?;
-                let table_index = self
-                    .metadata
-                    .write()
-                    .add_table(catalog, database, table_meta, source);
+                match table_meta.engine() {
+                    "VIEW" => {
+                        let query = table_meta
+                            .options()
+                            .get(QUERY)
+                            .ok_or_else(|| ErrorCode::LogicalError("Invalid VIEW object"))?;
+                        let tokens = tokenize_sql(query.as_str())?;
+                        let backtrace = Backtrace::new();
+                        let (stmt, _) = parse_sql(&tokens, &backtrace)?;
+                        if let Statement::Query(query) = &stmt {
+                            self.bind_query(bind_context, query).await
+                        } else {
+                            Err(ErrorCode::LogicalError(format!(
+                                "Invalid VIEW object: {}",
+                                table_meta.name()
+                            )))
+                        }
+                    }
+                    _ => {
+                        let source = table_meta
+                            .read_plan_with_catalog(self.ctx.clone(), catalog.clone(), None)
+                            .await?;
+                        let table_index = self.metadata.write().add_table(
+                            catalog,
+                            database.clone(),
+                            table_meta,
+                            source,
+                        );
 
-                let (s_expr, mut bind_context) = self.bind_base_table(bind_context, table_index)?;
-                if let Some(alias) = alias {
-                    bind_context.apply_table_alias(alias)?;
+                        let (s_expr, mut bind_context) =
+                            self.bind_base_table(bind_context, database.as_str(), table_index)?;
+                        if let Some(alias) = alias {
+                            bind_context.apply_table_alias(alias)?;
+                        }
+                        Ok((s_expr, bind_context))
+                    }
                 }
-                Ok((s_expr, bind_context))
             }
             TableReference::TableFunction {
+                span: _,
                 name,
                 params,
                 alias,
@@ -141,7 +186,7 @@ impl<'a> Binder {
                             Ok(Expression::Literal {
                                 value,
                                 column_name: None,
-                                data_type,
+                                data_type: *data_type,
                             })
                         }
                         _ => Err(ErrorCode::UnImplement(format!(
@@ -168,14 +213,19 @@ impl<'a> Binder {
                     source,
                 );
 
-                let (s_expr, mut bind_context) = self.bind_base_table(bind_context, table_index)?;
+                let (s_expr, mut bind_context) =
+                    self.bind_base_table(bind_context, "system", table_index)?;
                 if let Some(alias) = alias {
                     bind_context.apply_table_alias(alias)?;
                 }
                 Ok((s_expr, bind_context))
             }
-            TableReference::Join(join) => self.bind_join(bind_context, join).await,
-            TableReference::Subquery { subquery, alias } => {
+            TableReference::Join { span: _, join } => self.bind_join(bind_context, join).await,
+            TableReference::Subquery {
+                span: _,
+                subquery,
+                alias,
+            } => {
                 let (s_expr, mut bind_context) = self.bind_query(bind_context, subquery).await?;
                 if let Some(alias) = alias {
                     bind_context.apply_table_alias(alias)?;
@@ -188,6 +238,7 @@ impl<'a> Binder {
     fn bind_base_table(
         &mut self,
         bind_context: &BindContext,
+        database_name: &str,
         table_index: IndexType,
     ) -> Result<(SExpr, BindContext)> {
         let mut bind_context = BindContext::with_parent(Box::new(bind_context.clone()));
@@ -196,10 +247,11 @@ impl<'a> Binder {
         let table = metadata.table(table_index);
         for column in columns.iter() {
             let column_binding = ColumnBinding {
+                database_name: Some(database_name.to_string()),
                 table_name: Some(table.name.clone()),
                 column_name: column.name.to_lowercase(),
                 index: column.column_index,
-                data_type: column.data_type.clone(),
+                data_type: Box::new(column.data_type.clone()),
                 visible_in_unqualified_wildcard: true,
             };
             bind_context.add_column_binding(column_binding);
@@ -209,10 +261,57 @@ impl<'a> Binder {
                 LogicalGet {
                     table_index,
                     columns: columns.into_iter().map(|col| col.column_index).collect(),
+                    push_down_predicates: None,
                 }
                 .into(),
             ),
             bind_context,
         ))
+    }
+
+    async fn resolve_data_source(
+        &self,
+        tenant: &str,
+        catalog_name: &str,
+        database_name: &str,
+        table_name: &str,
+        travel_point: &Option<NavigationPoint>,
+    ) -> Result<Arc<dyn Table>> {
+        // Resolve table with catalog
+        let catalog = self.catalogs.get_catalog(catalog_name)?;
+        let mut table_meta = catalog.get_table(tenant, database_name, table_name).await?;
+
+        if let Some(tp) = travel_point {
+            table_meta = table_meta.navigate_to(self.ctx.clone(), tp).await?;
+        }
+        Ok(table_meta)
+    }
+
+    async fn resolve_data_travel_point(
+        &self,
+        bind_context: &BindContext,
+        travel_point: &TimeTravelPoint<'a>,
+    ) -> Result<NavigationPoint> {
+        match travel_point {
+            TimeTravelPoint::Snapshot(s) => Ok(NavigationPoint::SnapshotID(s.to_owned())),
+            TimeTravelPoint::Timestamp(expr) => {
+                let mut type_checker =
+                    TypeChecker::new(bind_context, self.ctx.clone(), self.metadata.clone());
+                let box (scalar, data_type) = type_checker
+                    .resolve(expr, Some(TimestampType::new_impl(6)))
+                    .await?;
+
+                if let Scalar::ConstantExpr(ConstantExpr { value, .. }) = scalar {
+                    if let DataTypeImpl::Timestamp(datatime_64) = data_type {
+                        return Ok(NavigationPoint::TimePoint(
+                            datatime_64.utc_timestamp(value.as_i64()?),
+                        ));
+                    }
+                }
+                Err(ErrorCode::InvalidArgument(
+                    "TimeTravelPoint must be constant timestamp",
+                ))
+            }
+        }
     }
 }

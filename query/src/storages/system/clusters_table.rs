@@ -17,11 +17,12 @@ use std::sync::Arc;
 use common_datablocks::DataBlock;
 use common_datavalues::prelude::*;
 use common_exception::Result;
-use common_meta_types::TableIdent;
-use common_meta_types::TableInfo;
-use common_meta_types::TableMeta;
+use common_meta_app::schema::TableIdent;
+use common_meta_app::schema::TableInfo;
+use common_meta_app::schema::TableMeta;
 
-use crate::sessions::QueryContext;
+use crate::clusters::ClusterHelper;
+use crate::sessions::TableContext;
 use crate::storages::system::table::SyncOneBlockSystemTable;
 use crate::storages::system::table::SyncSystemTable;
 use crate::storages::Table;
@@ -37,7 +38,7 @@ impl SyncSystemTable for ClustersTable {
         &self.table_info
     }
 
-    fn get_full_data(&self, ctx: Arc<QueryContext>) -> Result<DataBlock> {
+    fn get_full_data(&self, ctx: Arc<dyn TableContext>) -> Result<DataBlock> {
         let cluster_nodes = ctx.get_cluster().get_nodes();
 
         let mut names = MutableStringColumn::with_capacity(cluster_nodes.len());

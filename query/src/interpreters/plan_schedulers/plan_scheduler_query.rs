@@ -11,51 +11,97 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-//
 
 use std::sync::Arc;
 
 use common_exception::Result;
 use common_planners::PlanNode;
-use common_streams::SendableDataBlockStream;
-use common_tracing::tracing;
+use tracing::debug;
 
-use crate::interpreters::plan_schedulers;
-use crate::interpreters::plan_schedulers::Scheduled;
-use crate::interpreters::plan_schedulers::ScheduledStream;
-use crate::interpreters::PlanScheduler;
-use crate::pipelines::processors::PipelineBuilder;
+use crate::interpreters::fragments::Fragmenter;
+use crate::interpreters::fragments::QueryFragmentsActions;
+use crate::interpreters::fragments::QueryFragmentsBuilder;
+use crate::interpreters::fragments::RootQueryFragment;
+use crate::pipelines::PipelineBuildResult;
+use crate::pipelines::QueryPipelineBuilder;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
+use crate::sql::executor::PhysicalPlan;
+use crate::sql::executor::PipelineBuilder as PipelineBuilderV2;
+use crate::sql::ColumnBinding;
 
-#[tracing::instrument(level = "debug", skip(ctx), fields(ctx.id = ctx.get_id().as_str()))]
-pub async fn schedule_query(
-    ctx: &Arc<QueryContext>,
+async fn schedule_query_impl(
+    ctx: Arc<QueryContext>,
     plan: &PlanNode,
-) -> Result<SendableDataBlockStream> {
-    let scheduler = PlanScheduler::try_create(ctx.clone())?;
-    let scheduled_tasks = scheduler.reschedule(plan)?;
-    let remote_stage_actions = scheduled_tasks.get_tasks()?;
+) -> Result<PipelineBuildResult> {
+    let query_fragments = QueryFragmentsBuilder::build(ctx.clone(), plan)?;
+    let root_query_fragments = RootQueryFragment::create(query_fragments, ctx.clone(), plan)?;
 
-    let config = ctx.get_config();
-    let cluster = ctx.get_cluster();
-    let timeout = ctx.get_settings().get_flight_client_timeout()?;
-    let mut scheduled = Scheduled::new();
-    for (node, action) in remote_stage_actions {
-        let mut flight_client = cluster.create_node_conn(&node.id, &config).await?;
-        let executing_action = flight_client.execute_action(action.clone(), timeout);
-
-        executing_action.await?;
-        scheduled.insert(node.id.clone(), node.clone());
+    if !root_query_fragments.is_distributed_query()? {
+        return QueryPipelineBuilder::create(ctx.clone()).finalize(plan);
     }
 
-    let pipeline_builder = PipelineBuilder::create(ctx.clone());
-    let mut in_local_pipeline = pipeline_builder.build(&scheduled_tasks.get_local_task())?;
+    let exchange_manager = ctx.get_exchange_manager();
+    let mut fragments_actions = QueryFragmentsActions::create(ctx.clone());
+    root_query_fragments.finalize(&mut fragments_actions)?;
 
-    match in_local_pipeline.execute().await {
-        Ok(stream) => Ok(ScheduledStream::create(ctx.clone(), scheduled, stream)),
-        Err(error) => {
-            plan_schedulers::handle_error(ctx, scheduled, timeout).await;
-            Err(error)
-        }
+    debug!("QueryFragments actions: {:?}", fragments_actions);
+
+    // TODO: move commit into pipeline processor(e.g CommitActionProcessor). It can help us make
+    // Interpreter::execute as sync method
+    exchange_manager
+        .commit_actions(ctx, fragments_actions)
+        .await
+}
+
+pub async fn schedule_query_new(
+    ctx: Arc<QueryContext>,
+    plan: &PlanNode,
+) -> Result<PipelineBuildResult> {
+    let settings = ctx.get_settings();
+    let mut pipeline = schedule_query_impl(ctx, plan).await?;
+    pipeline.set_max_threads(settings.get_max_threads()? as usize);
+    Ok(pipeline)
+}
+
+pub async fn schedule_query_v2(
+    ctx: Arc<QueryContext>,
+    result_columns: &[ColumnBinding],
+    plan: &PhysicalPlan,
+) -> Result<PipelineBuildResult> {
+    if !plan.is_distributed_plan() {
+        let pb = PipelineBuilderV2::create(ctx.clone());
+        let mut build_res = pb.finalize(plan)?;
+        PipelineBuilderV2::render_result_set(
+            plan.output_schema()?,
+            result_columns,
+            &mut build_res.main_pipeline,
+        )?;
+        build_res.set_max_threads(ctx.get_settings().get_max_threads()? as usize);
+        return Ok(build_res);
     }
+
+    let fragmenter = Fragmenter::try_create(ctx.clone())?;
+    let root_fragment = fragmenter.build_fragment(plan)?;
+
+    let mut fragments_actions = QueryFragmentsActions::create(ctx.clone());
+    root_fragment.get_actions(ctx.clone(), &mut fragments_actions)?;
+
+    let exchange_manager = ctx.get_exchange_manager();
+
+    let mut build_res = exchange_manager
+        .commit_actions(ctx.clone(), fragments_actions)
+        .await?;
+
+    let settings = ctx.get_settings();
+    build_res.set_max_threads(settings.get_max_threads()? as usize);
+
+    let input_schema = plan.output_schema()?;
+    PipelineBuilderV2::render_result_set(
+        input_schema,
+        result_columns,
+        &mut build_res.main_pipeline,
+    )?;
+
+    Ok(build_res)
 }

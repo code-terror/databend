@@ -14,7 +14,7 @@
 
 use common_ast::ast::Identifier;
 use common_ast::ast::TableAlias;
-use common_ast::parser::error::DisplayError as _;
+use common_ast::DisplayError;
 use common_datavalues::prelude::*;
 use common_exception::ErrorCode;
 use common_exception::Result;
@@ -22,8 +22,10 @@ use common_exception::Result;
 use super::AggregateInfo;
 use crate::sql::common::IndexType;
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ColumnBinding {
+    /// Database name of this `ColumnBinding` in current context
+    pub database_name: Option<String>,
     /// Table name of this `ColumnBinding` in current context
     pub table_name: Option<String>,
     /// Column name of this `ColumnBinding` in current context
@@ -31,7 +33,7 @@ pub struct ColumnBinding {
     /// Column index of ColumnBinding
     pub index: IndexType,
 
-    pub data_type: DataTypeImpl,
+    pub data_type: Box<DataTypeImpl>,
 
     /// Consider the sql: `select * from t join t1 using(a)`.
     /// The result should only contain one `a` column.
@@ -52,6 +54,9 @@ pub struct BindContext {
     /// non-grouping columns cannot be referenced outside aggregation
     /// functions, otherwise a grouping error will be raised.
     pub in_grouping: bool,
+
+    /// Format type of query output.
+    pub format: Option<String>,
 }
 
 impl BindContext {
@@ -65,7 +70,15 @@ impl BindContext {
             columns: vec![],
             aggregate_info: Default::default(),
             in_grouping: false,
+            format: None,
         }
+    }
+
+    /// Create a new BindContext with self's parent as its parent
+    pub fn replace(&self) -> Self {
+        let mut bind_context = BindContext::new();
+        bind_context.parent = self.parent.clone();
+        bind_context
     }
 
     /// Generate a new BindContext and take current BindContext as its parent.
@@ -86,7 +99,8 @@ impl BindContext {
     /// This method will rename column bindings according to table alias.
     pub fn apply_table_alias(&mut self, alias: &TableAlias) -> Result<()> {
         for column in self.columns.iter_mut() {
-            column.table_name = Some(alias.name.to_string());
+            column.database_name = None;
+            column.table_name = Some(alias.name.name.to_lowercase());
         }
 
         if alias.columns.len() > self.columns.len() {
@@ -106,7 +120,8 @@ impl BindContext {
     /// This method will return error if the given names are ambiguous or invalid.
     pub fn resolve_column(
         &self,
-        table: Option<String>,
+        database: Option<&str>,
+        table: Option<&str>,
         column: &Identifier,
     ) -> Result<ColumnBinding> {
         let mut result = vec![];
@@ -114,26 +129,11 @@ impl BindContext {
         let mut bind_context: &BindContext = self;
         // Lookup parent context to support correlated subquery
         loop {
-            for column_binding in self.columns.iter() {
-                match (&table, &column_binding.table_name) {
-                    // No qualified table name specified
-                    (None, None) | (None, Some(_))
-                        if column.name.to_lowercase() == column_binding.column_name =>
-                    {
-                        result.push(column_binding.clone());
-                    }
-
-                    // Qualified column reference
-                    (Some(table), Some(table_name))
-                        if table == table_name
-                            && column.name.to_lowercase() == column_binding.column_name =>
-                    {
-                        result.push(column_binding.clone());
-                    }
-                    _ => {}
+            for column_binding in bind_context.columns.iter() {
+                if Self::match_column_binding(database, table, column, column_binding) {
+                    result.push(column_binding.clone());
                 }
             }
-
             if !result.is_empty() {
                 break;
             }
@@ -162,6 +162,51 @@ impl BindContext {
         }
     }
 
+    pub fn match_column_binding(
+        database: Option<&str>,
+        table: Option<&str>,
+        column: &Identifier,
+        column_binding: &ColumnBinding,
+    ) -> bool {
+        match (
+            (database, column_binding.database_name.as_ref()),
+            (table, column_binding.table_name.as_ref()),
+        ) {
+            // No qualified table name specified
+            ((None, _), (None, None)) | ((None, _), (None, Some(_)))
+                if column.name.to_lowercase() == column_binding.column_name =>
+            {
+                true
+            }
+
+            // Qualified column reference without database name
+            ((None, _), (Some(table), Some(table_name)))
+                if &table.to_lowercase() == table_name
+                    && column.name.to_lowercase() == column_binding.column_name =>
+            {
+                true
+            }
+
+            // Qualified column reference with database name
+            ((Some(db), Some(db_name)), (Some(table), Some(table_name)))
+                if &db.to_lowercase() == db_name
+                    && &table.to_lowercase() == table_name
+                    && column.name.to_lowercase() == column_binding.column_name =>
+            {
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Get output format type.
+    /// For example, the output format type of query `SELECT 1,2 format CSV` is CSV.
+    /// Only used in Clickhouse http handler.
+    pub fn resolve_format(&mut self, format: String) -> Result<()> {
+        self.format = Some(format);
+        Ok(())
+    }
+
     /// Get result columns of current context in order.
     /// For example, a query `SELECT b, a AS b FROM t` has `[(index_of(b), "b"), index_of(a), "b"]` as
     /// its result columns.
@@ -173,5 +218,20 @@ impl BindContext {
             .iter()
             .map(|col| (col.index, col.column_name.clone()))
             .collect()
+    }
+
+    /// Return data scheme.
+    pub fn output_schema(&self) -> DataSchemaRef {
+        let fields = self
+            .columns
+            .iter()
+            .map(|column_binding| {
+                DataField::new(
+                    &column_binding.column_name,
+                    *column_binding.data_type.clone(),
+                )
+            })
+            .collect();
+        DataSchemaRefExt::create(fields)
     }
 }

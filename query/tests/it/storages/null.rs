@@ -11,27 +11,23 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-//
 
 use common_base::base::tokio;
-use common_datablocks::DataBlock;
 use common_datavalues::prelude::*;
 use common_exception::Result;
-use common_meta_types::TableInfo;
-use common_meta_types::TableMeta;
+use common_meta_app::schema::TableInfo;
+use common_meta_app::schema::TableMeta;
 use common_planners::*;
 use databend_query::storages::null::NullTable;
+use databend_query::storages::TableStreamReadWrap;
 use databend_query::storages::ToReadDataSourcePlan;
 use futures::TryStreamExt;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_null_table() -> Result<()> {
     let ctx = crate::tests::create_query_context().await?;
-    let schema = DataSchemaRefExt::create(vec![
-        DataField::new("a", u64::to_data_type()),
-        DataField::new("b", u64::to_data_type()),
-    ]);
-    let table = NullTable::try_create(crate::tests::create_storage_context()?, TableInfo {
+
+    let table = NullTable::try_create(crate::tests::create_storage_context().await?, TableInfo {
         desc: "'default'.'a'".into(),
         name: "a".into(),
         ident: Default::default(),
@@ -43,22 +39,6 @@ async fn test_null_table() -> Result<()> {
             ..Default::default()
         },
     })?;
-
-    // append data.
-    {
-        let block = DataBlock::create(schema.clone(), vec![
-            Series::from_data(vec![1u64, 2]),
-            Series::from_data(vec![11u64, 22]),
-        ]);
-
-        let blocks = vec![Ok(block)];
-
-        let input_stream = futures::stream::iter::<Vec<Result<DataBlock>>>(blocks.clone());
-        table
-            .append_data(ctx.clone(), Box::pin(input_stream))
-            .await
-            .unwrap();
-    }
 
     // read.
     {
@@ -75,7 +55,7 @@ async fn test_null_table() -> Result<()> {
     {
         let truncate_plan = TruncateTablePlan {
             catalog: "default".to_string(),
-            db: "default".to_string(),
+            database: "default".to_string(),
             table: "a".to_string(),
             purge: false,
         };

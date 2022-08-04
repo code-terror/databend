@@ -16,7 +16,9 @@ use std::collections::BTreeSet;
 
 use common_meta_api::KVApi;
 use common_meta_sled_store::openraft;
+use common_meta_sled_store::openraft::error::ChangeMembershipError;
 use common_meta_sled_store::openraft::error::ClientWriteError;
+use common_meta_sled_store::openraft::error::InProgress;
 use common_meta_sled_store::openraft::raft::EntryPayload;
 use common_meta_types::AppliedState;
 use common_meta_types::Cmd;
@@ -28,8 +30,8 @@ use common_meta_types::MetaError;
 use common_meta_types::MetaRaftError;
 use common_meta_types::Node;
 use common_meta_types::NodeId;
-use common_tracing::tracing;
 use openraft::raft::ClientWriteRequest;
+use tracing::debug;
 
 use crate::meta_service::ForwardRequestBody;
 use crate::meta_service::JoinRequest;
@@ -54,9 +56,11 @@ impl<'a> MetaLeader<'a> {
         &self,
         req: ForwardRequest,
     ) -> Result<ForwardResponse, MetaError> {
-        tracing::debug!("handle_forwardable_req: {:?}", req);
+        debug!("handle_forwardable_req: {:?}", req);
 
         match req.body {
+            ForwardRequestBody::Ping => Ok(ForwardResponse::Pong),
+
             ForwardRequestBody::Join(join_req) => {
                 self.join(join_req).await?;
                 Ok(ForwardResponse::Join(()))
@@ -98,6 +102,7 @@ impl<'a> MetaLeader<'a> {
     pub async fn join(&self, req: JoinRequest) -> Result<(), MetaError> {
         let node_id = req.node_id;
         let endpoint = req.endpoint;
+        let grpc_api_addr = req.grpc_api_addr;
         let metrics = self.meta_node.raft.metrics().borrow().clone();
         let membership = metrics.membership_config.membership.clone();
 
@@ -105,28 +110,34 @@ impl<'a> MetaLeader<'a> {
             return Ok(());
         }
 
-        // TODO(xp): deal with joint config
-        assert!(membership.get_ith_config(1).is_none());
-
-        // safe unwrap: if the first config is None, panic is the expected behavior here.
-        let mut membership = membership.get_ith_config(0).unwrap().clone();
-
-        membership.insert(node_id);
-
-        let ent = LogEntry {
-            txid: None,
-            cmd: Cmd::AddNode {
-                node_id,
-                node: Node {
-                    name: node_id.to_string(),
-                    endpoint,
-                },
-            },
-        };
-
-        self.write(ent).await?;
-
-        self.change_membership(membership).await
+        // deal with joint config，If the cluster is in joint config,
+        // we need to return an Inprogress error with membership log id.
+        match membership.get_ith_config(1) {
+            Some(_membership) => Err(MetaRaftError::ChangeMembershipError(
+                ChangeMembershipError::InProgress(InProgress {
+                    membership_log_id: metrics.membership_config.log_id,
+                }),
+            )
+            .into()),
+            None => {
+                // safe unwrap: if the first config is None, panic is the expected behavior here.
+                let mut membership = membership.get_ith_config(0).unwrap().clone();
+                membership.insert(node_id);
+                let ent = LogEntry {
+                    txid: None,
+                    cmd: Cmd::AddNode {
+                        node_id,
+                        node: Node {
+                            name: node_id.to_string(),
+                            endpoint,
+                            grpc_api_addr: Some(grpc_api_addr),
+                        },
+                    },
+                };
+                self.write(ent).await?;
+                self.change_membership(membership).await
+            }
+        }
     }
 
     /// A node leave the cluster.
@@ -145,21 +156,29 @@ impl<'a> MetaLeader<'a> {
             return Ok(());
         }
 
-        // TODO(xp): deal with joint config
-        assert!(membership.get_ith_config(1).is_none());
+        // deal with joint config，If the cluster is in joint config,
+        // we need to return an Inprogress error with membership log id.
+        match membership.get_ith_config(1) {
+            Some(_membership) => Err(MetaRaftError::ChangeMembershipError(
+                ChangeMembershipError::InProgress(InProgress {
+                    membership_log_id: metrics.membership_config.log_id,
+                }),
+            )
+            .into()),
+            None => {
+                // safe unwrap: if the first config is None, panic is the expected behavior here.
+                let mut membership = membership.get_ith_config(0).unwrap().clone();
+                membership.remove(&node_id);
 
-        // safe unwrap: if the first config is None, panic is the expected behavior here.
-        let mut membership = membership.get_ith_config(0).unwrap().clone();
-
-        membership.remove(&node_id);
-
-        self.change_membership(membership).await?;
-        let ent = LogEntry {
-            txid: None,
-            cmd: Cmd::RemoveNode { node_id },
-        };
-        self.write(ent).await?;
-        Ok(())
+                self.change_membership(membership).await?;
+                let ent = LogEntry {
+                    txid: None,
+                    cmd: Cmd::RemoveNode { node_id },
+                };
+                self.write(ent).await?;
+                Ok(())
+            }
+        }
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -197,22 +216,19 @@ impl<'a> MetaLeader<'a> {
     /// TODO(xp): elaborate the UnknownError, e.g. LeaderLostError
     #[tracing::instrument(level = "debug", skip(self, entry))]
     pub async fn write(&self, entry: LogEntry) -> Result<AppliedState, MetaError> {
-        tracing::debug!(entry = debug(&entry), "write LogEntry");
+        debug!(entry = debug(&entry), "write LogEntry");
         let write_rst = self
             .meta_node
             .raft
             .client_write(ClientWriteRequest::new(EntryPayload::Normal(entry)))
             .await;
 
-        tracing::debug!("raft.client_write rst: {:?}", write_rst);
+        debug!("raft.client_write rst: {:?}", write_rst);
 
         match write_rst {
             Ok(resp) => {
                 let data = resp.data;
-                match data {
-                    AppliedState::AppError(ae) => Err(MetaError::from(ae)),
-                    _ => Ok(data),
-                }
+                Ok(data)
             }
 
             Err(cli_write_err) => match cli_write_err {

@@ -53,7 +53,7 @@ impl Function for AsFunction {
 
     fn return_type(&self) -> DataTypeImpl {
         if !self.data_type.data_type_id().is_variant() {
-            return NullType::arc();
+            return NullType::new_impl();
         }
         match self.type_id {
             TypeID::Boolean => NullableType::new_impl(BooleanType::new_impl()),
@@ -73,7 +73,7 @@ impl Function for AsFunction {
         input_rows: usize,
     ) -> Result<ColumnRef> {
         if !columns[0].field().data_type().data_type_id().is_variant() {
-            return NullType::arc().create_constant_column(&DataValue::Null, input_rows);
+            return NullType::new_impl().create_constant_column(&DataValue::Null, input_rows);
         }
 
         let variant_column: &VariantColumn = if columns[0].column().is_const() {
@@ -150,12 +150,10 @@ impl Function for AsFunction {
                     bitmap.into(),
                 ));
             }
-            _ => {
-                return Err(ErrorCode::UnknownFunction(format!(
-                    "Unsupported Function {} as {}",
-                    self.display_name, self.type_id
-                )));
-            }
+            _ => Err(ErrorCode::UnknownFunction(format!(
+                "Unsupported Function {} as {}",
+                self.display_name, self.type_id
+            ))),
         }
     }
 }

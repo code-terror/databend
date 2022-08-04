@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use common_ast::ast::Expr;
 use common_ast::ast::Literal;
-use common_base::infallible::RwLock;
 use common_datavalues::prelude::*;
 use common_planners::ReadDataSourcePlan;
+use parking_lot::RwLock;
 
 use crate::sql::common::IndexType;
+use crate::sql::optimizer::ColumnSet;
 use crate::storages::Table;
 
 pub type MetadataRef = Arc<RwLock<Metadata>>;
@@ -35,6 +37,16 @@ pub struct TableEntry {
     pub table: Arc<dyn Table>,
 
     pub source: ReadDataSourcePlan,
+}
+
+impl Debug for TableEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "TableEntry {{ index: {:?}, name: {:?}, catalog: {:?}, database: {:?} }}",
+            self.index, self.name, self.catalog, self.database
+        )
+    }
 }
 
 impl TableEntry {
@@ -57,7 +69,7 @@ impl TableEntry {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ColumnEntry {
     pub column_index: IndexType,
     pub name: String,
@@ -86,7 +98,7 @@ impl ColumnEntry {
 /// Metadata stores information about columns and tables used in a query.
 /// Tables and columns are identified with its unique index, notice that index value of a column can
 /// be same with that of a table.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Metadata {
     tables: Vec<TableEntry>,
     columns: Vec<ColumnEntry>,
@@ -104,15 +116,32 @@ impl Metadata {
         self.tables.get(index).unwrap()
     }
 
+    pub fn tables(&self) -> &[TableEntry] {
+        self.tables.as_slice()
+    }
+
+    pub fn table_index_by_column_indexes(&self, column_indexes: &ColumnSet) -> Option<IndexType> {
+        for column in self.columns.iter() {
+            if column_indexes.contains(&column.column_index) {
+                return column.table_index;
+            }
+        }
+        None
+    }
+
     pub fn column(&self, index: IndexType) -> &ColumnEntry {
         self.columns.get(index).unwrap()
+    }
+
+    pub fn columns(&self) -> &[ColumnEntry] {
+        self.columns.as_slice()
     }
 
     pub fn columns_by_table_index(&self, index: IndexType) -> Vec<ColumnEntry> {
         let mut result = vec![];
         for col in self.columns.iter() {
             match col.table_index {
-                Some(col_index) if col_index == index => {
+                Some(table_index) if table_index == index => {
                     result.push(col.clone());
                 }
                 _ => {}

@@ -5,13 +5,11 @@ description:
   Load data from Databend stages.
 ---
 
-<p align="center">
-<img src="https://datafuse-1253727613.cos.ap-hongkong.myqcloud.com/load/load-data-from-stage.png" width="550"/>
-</p>
+![image](../../public/img/load/load-data-from-stage.png)
 
 ### Before You Begin
 
-* **Databend :** Make sure Databend is running and accessible, see [Deploy Databend With MinIO](/doc/deploy/minio).
+* **Databend :** Make sure Databend is running and accessible, see [Deploy Databend With MinIO](../10-deploy/02-deploying-databend.md).
 
 ### Step 1. Create Stage Object
 
@@ -124,12 +122,12 @@ mysql -h127.0.0.1 -uroot -P3307
 
 ```sql
 LIST @my_int_stage;
-+---------------+
-| file_name     |
-+---------------+
-| books.csv     |
-| books.parquet |
-+---------------+
++---------------+------+------+-------------------------------+--------------------+
+| name          | size | md5  | last_modified                 | creator            |
++---------------+------+------+-------------------------------+--------------------+
+| books.csv     |   91 | NULL | 2022-06-10 12:01:40.000 +0000 | 'root'@'127.0.0.1' |
+| books.parquet |   91 | NULL | 2022-06-10 12:01:40.000 +0000 | 'root'@'127.0.0.1' |
++---------------+------+------+-------------------------------+--------------------+
 ```
 
 ### Step 4. Creating Database and Table
@@ -153,7 +151,7 @@ CREATE TABLE books
 
 ### Step 5. Copy Data into the Target Tables
 
-Execute [COPY](/doc/reference/sql/dml/dml-copy) to load staged files to the target table.
+Execute [COPY](../30-reference/30-sql/10-dml/dml-copy-into-table.md) to load staged files to the target table.
 
 <Tabs groupId="sample-data">
 

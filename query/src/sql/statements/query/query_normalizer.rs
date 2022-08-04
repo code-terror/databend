@@ -19,14 +19,16 @@ use common_exception::ErrorCode;
 use common_exception::Result;
 use common_planners::extract_aliases;
 use common_planners::find_aggregate_exprs_in_expr;
+use common_planners::find_window_exprs_in_expr;
 use common_planners::resolve_aliases_to_exprs;
 use common_planners::Expression;
-use common_tracing::tracing;
 use sqlparser::ast::Expr;
 use sqlparser::ast::OffsetRows;
 use sqlparser::ast::SelectItem;
+use tracing::debug;
 
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 use crate::sql::statements::analyzer_expr::ExpressionAnalyzer;
 use crate::sql::statements::query::QueryASTIR;
 use crate::sql::statements::DfQueryStatement;
@@ -50,6 +52,7 @@ impl QueryNormalizer {
                 having_predicate: None,
                 group_by_expressions: vec![],
                 aggregate_expressions: vec![],
+                window_expressions: vec![],
                 distinct: false,
                 order_by_expressions: vec![],
                 projection_expressions: vec![],
@@ -68,37 +71,37 @@ impl QueryNormalizer {
         if let Err(cause) = self.visit_filter(query).await {
             return Err(cause.add_message_back(" (while in analyze select filter)"));
         }
-        tracing::debug!("after analyse of filter:\n{:?}", self.query_ast_ir);
+        debug!("after analyse of filter:\n{:?}", self.query_ast_ir);
 
         if let Err(cause) = self.analyze_projection(query).await {
             return Err(cause.add_message_back(" (while in analyze select projection)"));
         }
-        tracing::debug!("after analyse of projection:\n{:?}", self.query_ast_ir);
+        debug!("after analyse of projection:\n{:?}", self.query_ast_ir);
 
         if let Err(cause) = self.analyze_group_by(query).await {
             return Err(cause.add_message_back(" (while in analyze select group by)"));
         }
-        tracing::debug!("after analyse of group_by:\n{:?}", self.query_ast_ir);
+        debug!("after analyse of group_by:\n{:?}", self.query_ast_ir);
 
         if let Err(cause) = self.analyze_having(query).await {
             return Err(cause.add_message_back(" (while in analyze select having)"));
         }
-        tracing::debug!("after analyse of having:\n{:?}", self.query_ast_ir);
+        debug!("after analyse of having:\n{:?}", self.query_ast_ir);
 
         if query.distinct {
             self.query_ast_ir.distinct = true;
         }
-        tracing::debug!("after analyse of distinct:\n{:?}", self.query_ast_ir);
+        debug!("after analyse of distinct:\n{:?}", self.query_ast_ir);
 
         if let Err(cause) = self.analyze_order_by(query).await {
             return Err(cause.add_message_back(" (while in analyze select order by)"));
         }
-        tracing::debug!("after analyse of order_by:\n{:?}", self.query_ast_ir);
+        debug!("after analyse of order_by:\n{:?}", self.query_ast_ir);
 
         if let Err(cause) = self.analyze_limit(query).await {
             return Err(cause.add_message_back(" (while in analyze select limit)"));
         }
-        tracing::debug!("after analyse of limit:\n{:?}", self.query_ast_ir);
+        debug!("after analyse of limit:\n{:?}", self.query_ast_ir);
 
         Ok(self.query_ast_ir)
     }
@@ -118,6 +121,7 @@ impl QueryNormalizer {
 
         for projection_expression in &projection_expressions {
             self.add_aggregate_function(projection_expression)?;
+            self.add_window_function(projection_expression)?;
         }
 
         self.query_ast_ir.projection_expressions = projection_expressions;
@@ -153,7 +157,7 @@ impl QueryNormalizer {
                 .push(Expression::Sort {
                     expr: Box::new(expression.clone()),
                     asc: order_by_expr.asc.unwrap_or(true),
-                    nulls_first: order_by_expr.asc.unwrap_or(true),
+                    nulls_first: order_by_expr.nulls_first.unwrap_or(true),
                     origin_expr: Box::new(expression),
                 });
         }
@@ -241,6 +245,16 @@ impl QueryNormalizer {
                 .contains(&aggregate_expr)
             {
                 self.query_ast_ir.aggregate_expressions.push(aggregate_expr);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn add_window_function(&mut self, expr: &Expression) -> Result<()> {
+        for window_expr in find_window_exprs_in_expr(expr) {
+            if !self.query_ast_ir.window_expressions.contains(&window_expr) {
+                self.query_ast_ir.window_expressions.push(window_expr);
             }
         }
 

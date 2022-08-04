@@ -11,7 +11,6 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-//
 
 use std::time::Duration;
 
@@ -37,6 +36,9 @@ pub struct RpcClientConf {
 
     /// Timeout for an RPC
     pub timeout: Option<Duration>,
+    /// AutoSyncInterval is the interval to update endpoints with its latest members.
+    /// None disables auto-sync.
+    pub auto_sync_interval: Option<Duration>,
 }
 
 impl RpcClientConf {

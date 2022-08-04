@@ -22,7 +22,7 @@ use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
 
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
+use crate::sessions::QueryAffect;
 use crate::sessions::QueryContext;
 
 pub struct UseDatabaseInterpreter {
@@ -31,8 +31,8 @@ pub struct UseDatabaseInterpreter {
 }
 
 impl UseDatabaseInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, plan: UseDatabasePlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(UseDatabaseInterpreter { ctx, plan }))
+    pub fn try_create(ctx: Arc<QueryContext>, plan: UseDatabasePlan) -> Result<Self> {
+        Ok(UseDatabaseInterpreter { ctx, plan })
     }
 }
 
@@ -42,14 +42,16 @@ impl Interpreter for UseDatabaseInterpreter {
         "UseDatabaseInterpreter"
     }
 
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
-        if self.plan.db.trim().is_empty() {
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
+        if self.plan.database.trim().is_empty() {
             return Err(ErrorCode::UnknownDatabase("No database selected"));
         }
-        self.ctx.set_current_database(self.plan.db.clone()).await?;
+        self.ctx
+            .set_current_database(self.plan.database.clone())
+            .await?;
+        self.ctx.set_affect(QueryAffect::UseDB {
+            name: self.plan.database.clone(),
+        });
         let schema = Arc::new(DataSchema::empty());
         Ok(Box::pin(DataBlockStream::create(schema, None, vec![])))
     }

@@ -66,6 +66,22 @@ pub trait ExpressionVisitor: Sized {
                                         stack.push(RecursionProcessing::Call(arg));
                                     }
                                 }
+                                Expression::WindowFunction {
+                                    args,
+                                    partition_by,
+                                    order_by,
+                                    ..
+                                } => {
+                                    for arg_expr in args {
+                                        stack.push(RecursionProcessing::Call(arg_expr));
+                                    }
+                                    for part_by_expr in partition_by {
+                                        stack.push(RecursionProcessing::Call(part_by_expr));
+                                    }
+                                    for order_by_expr in order_by {
+                                        stack.push(RecursionProcessing::Call(order_by_expr));
+                                    }
+                                }
                                 Expression::Cast { expr, .. } => {
                                     stack.push(RecursionProcessing::Call(expr));
                                 }
@@ -125,7 +141,6 @@ impl Expression {
     /// ```
     ///
     /// If an Err result is returned, recursion is stopped immediately
-    ///
     pub fn accept<V: ExpressionVisitor>(&self, visitor: V) -> Result<V> {
         let visitor = match visitor.pre_visit(self)? {
             Recursion::Continue(visitor) => visitor,

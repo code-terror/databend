@@ -62,7 +62,10 @@ async fn test_rejected_session_with_sequence() -> Result<()> {
             Ok(_) => panic!("Expected rejected connection"),
             Err(error) => {
                 assert_eq!(error.code(), 1067);
-                assert_eq!(error.message(), "Reject connection, cause: Server error: `ERROR HY000 (1815): The current accept connection has exceeded max_active_sessions config'");
+                assert_eq!(
+                    error.message(),
+                    "Reject connection, cause: Server error: `ERROR HY000 (1815): The current accept connection has exceeded max_active_sessions config'"
+                );
             }
         };
 
@@ -99,7 +102,10 @@ async fn test_rejected_session_with_parallel() -> Result<()> {
                 Err(error) => {
                     destroy_barrier.wait().await;
                     assert_eq!(error.code(), 1067);
-                    assert_eq!(error.message(), "Reject connection, cause: Server error: `ERROR HY000 (1815): The current accept connection has exceeded max_active_sessions config'");
+                    assert_eq!(
+                        error.message(),
+                        "Reject connection, cause: Server error: `ERROR HY000 (1815): The current accept connection has exceeded max_active_sessions config'"
+                    );
                     CreateServerResult::Rejected
                 }
             }
@@ -140,7 +146,7 @@ async fn test_rejected_session_with_parallel() -> Result<()> {
 }
 
 async fn create_connection(port: u16) -> Result<mysql_async::Conn> {
-    let uri = &format!("mysql://127.0.0.1:{}", port);
+    let uri = &format!("mysql://root@127.0.0.1:{}", port);
     let opts = mysql_async::Opts::from_url(uri).unwrap();
     mysql_async::Conn::new(opts)
         .await

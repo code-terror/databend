@@ -13,20 +13,26 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::Result;
+use async_trait::async_trait;
 use common_base::base::tokio;
 use common_base::base::GlobalSequence;
 use common_base::base::Stoppable;
+use common_meta_api::ApiBuilder;
 use common_meta_grpc::ClientHandle;
 use common_meta_grpc::MetaGrpcClient;
 use common_meta_sled_store::openraft::NodeId;
 use common_meta_types::protobuf::raft_service_client::RaftServiceClient;
-use common_meta_types::protobuf::GetRequest;
-use common_tracing::tracing;
+use common_meta_types::ForwardRequest;
+use common_meta_types::ForwardRequestBody;
 use databend_meta::api::GrpcServer;
 use databend_meta::configs;
 use databend_meta::meta_service::MetaNode;
+use tracing::info;
+use tracing::warn;
 
 // Start one random service and get the session manager.
 #[tracing::instrument(level = "info")]
@@ -41,8 +47,9 @@ pub async fn start_metasrv() -> Result<(MetaSrvTestContext, String)> {
 }
 
 pub async fn start_metasrv_with_context(tc: &mut MetaSrvTestContext) -> Result<()> {
-    let mn = MetaNode::start(&tc.config.raft_config).await?;
-    mn.join_cluster(&tc.config.raft_config).await?;
+    let mn = MetaNode::start(&tc.config).await?;
+    mn.join_cluster(&tc.config.raft_config, tc.config.grpc_api_address.clone())
+        .await?;
     let mut srv = GrpcServer::create(tc.config.clone(), mn);
     srv.start().await?;
     tc.grpc_srv = Some(Box::new(srv));
@@ -99,7 +106,7 @@ impl MetaSrvTestContext {
 
         // On mac File::sync_all() takes 10 ms ~ 30 ms, 500 ms at worst, which very likely to fail a test.
         if cfg!(target_os = "macos") {
-            tracing::warn!("Disabled fsync for meta data tests. fsync on mac is quite slow");
+            warn!("Disabled fsync for meta data tests. fsync on mac is quite slow");
             config.raft_config.no_sync = true;
         }
 
@@ -132,12 +139,7 @@ impl MetaSrvTestContext {
             config.admin_api_address = format!("{}:{}", host, http_port);
         }
 
-        {
-            let metric_port = next_port();
-            config.metric_api_address = format!("{}:{}", host, metric_port);
-        }
-
-        tracing::info!("new test context config: {:?}", config);
+        info!("new test context config: {:?}", config);
 
         MetaSrvTestContext {
             config,
@@ -153,7 +155,14 @@ impl MetaSrvTestContext {
     pub async fn grpc_client(&self) -> anyhow::Result<Arc<ClientHandle>> {
         let addr = self.config.grpc_api_address.clone();
 
-        let client = MetaGrpcClient::try_create(vec![addr], "root", "xxx", None, None).await?;
+        let client = MetaGrpcClient::try_create(
+            vec![addr],
+            "root",
+            "xxx",
+            None,
+            Some(Duration::from_secs(10)),
+            None,
+        )?;
         Ok(client)
     }
 
@@ -168,7 +177,7 @@ impl MetaSrvTestContext {
             match client {
                 Ok(x) => return Ok(x),
                 Err(err) => {
-                    tracing::info!("can not yet connect to {}, {}, sleep a while", addr, err);
+                    info!("can not yet connect to {}, {}, sleep a while", addr, err);
                     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                 }
             }
@@ -180,11 +189,12 @@ impl MetaSrvTestContext {
     pub async fn assert_raft_server_connection(&self) -> anyhow::Result<()> {
         let mut client = self.raft_client().await?;
 
-        let req = tonic::Request::new(GetRequest {
-            key: "ensure-connection".into(),
-        });
-        let rst = client.get(req).await?.into_inner();
-        assert_eq!("", rst.value, "connected");
+        let req = ForwardRequest {
+            forward_to_leader: 0,
+            body: ForwardRequestBody::Ping,
+        };
+
+        client.forward(req).await?;
         Ok(())
     }
 }
@@ -198,12 +208,50 @@ macro_rules! init_meta_ut {
         let t = tempfile::tempdir().expect("create temp dir to sled db");
         common_meta_sled_store::init_temp_sled_db(t);
 
-        // common_tracing::init_tracing(&format!("ut-{}", name), "./_logs")
-        common_tracing::init_meta_ut_tracing();
+        $crate::tests::logging::init_meta_ut_tracing();
 
         let name = common_tracing::func_name!();
-        let span =
-            common_tracing::tracing::debug_span!("ut", "{}", name.split("::").last().unwrap());
+        let span = tracing::debug_span!("ut", "{}", name.split("::").last().unwrap());
         ((), span)
     }};
+}
+
+/// Build metasrv or metasrv cluster, returns the clients
+#[derive(Clone)]
+pub struct MetaSrvBuilder {
+    pub test_contexts: Arc<Mutex<Vec<MetaSrvTestContext>>>,
+}
+
+#[async_trait]
+impl ApiBuilder<Arc<ClientHandle>> for MetaSrvBuilder {
+    async fn build(&self) -> Arc<ClientHandle> {
+        let (tc, addr) = start_metasrv().await.unwrap();
+
+        let client =
+            MetaGrpcClient::try_create(vec![addr], "root", "xxx", None, None, None).unwrap();
+
+        {
+            let mut tcs = self.test_contexts.lock().unwrap();
+            tcs.push(tc);
+        }
+
+        client
+    }
+
+    async fn build_cluster(&self) -> Vec<Arc<ClientHandle>> {
+        let tcs = start_metasrv_cluster(&[0, 1, 2]).await.unwrap();
+
+        let cluster = vec![
+            tcs[0].grpc_client().await.unwrap(),
+            tcs[1].grpc_client().await.unwrap(),
+            tcs[2].grpc_client().await.unwrap(),
+        ];
+
+        {
+            let mut test_contexts = self.test_contexts.lock().unwrap();
+            test_contexts.extend(tcs);
+        }
+
+        cluster
+    }
 }

@@ -14,10 +14,15 @@
 
 use std::env;
 
+use clap::Args;
 use clap::Parser;
+use common_meta_raft_store::config::get_default_raft_advertise_host;
 use common_meta_raft_store::config::RaftConfig as InnerRaftConfig;
 use common_meta_types::MetaError;
 use common_meta_types::MetaResult;
+use common_tracing::Config as InnerLogConfig;
+use common_tracing::FileConfig as InnerFileLogConfig;
+use common_tracing::StderrConfig as InnerStderrLogConfig;
 use serde::Deserialize;
 use serde::Serialize;
 use serfig::collectors::from_env;
@@ -26,22 +31,49 @@ use serfig::collectors::from_self;
 use serfig::parsers::Toml;
 
 use super::inner::Config as InnerConfig;
+use crate::version::METASRV_COMMIT_VERSION;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Parser)]
-#[clap(about, version, author)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Parser)]
+#[clap(about, version = &**METASRV_COMMIT_VERSION, author)]
 #[serde(default)]
 pub struct Config {
+    /// Run a command
+    ///
+    /// Supported commands:
+    /// - `ver`: print version and quit.
+    /// - `show-config`: print effective config and quit.
+    /// - `kvapi::<cmd>`: run kvapi command. The command can be `upsert`, `get`, `mget` and `list`
+    #[clap(long, default_value = "")]
+    pub cmd: String,
+
+    #[clap(long, default_value = "", multiple = true)]
+    pub key: Vec<String>,
+
+    #[clap(long, default_value = "")]
+    pub value: String,
+
+    #[clap(long, default_value = "")]
+    pub prefix: String,
+
+    #[clap(long, default_value = "root")]
+    pub username: String,
+
+    #[clap(long, default_value = "")]
+    pub password: String,
+
     #[clap(long, short = 'c', default_value = "")]
     pub config_file: String,
 
-    #[clap(long, default_value = "INFO")]
+    /// Log level <DEBUG|INFO|ERROR>
+    #[clap(long = "log-level", default_value = "INFO")]
     pub log_level: String,
 
-    #[clap(long, default_value = "./.databend/logs")]
+    /// Log file dir
+    #[clap(long = "log-dir", default_value = "./.databend/logs")]
     pub log_dir: String,
 
-    #[clap(long, default_value = "127.0.0.1:28001")]
-    pub metric_api_address: String,
+    #[clap(flatten)]
+    pub log: LogConfig,
 
     #[clap(long, default_value = "127.0.0.1:28002")]
     pub admin_api_address: String,
@@ -72,33 +104,49 @@ impl Default for Config {
     }
 }
 
-impl TryInto<InnerConfig> for Config {
-    type Error = MetaError;
+impl From<Config> for InnerConfig {
+    fn from(x: Config) -> Self {
+        let mut log: InnerLogConfig = x.log.into();
+        if x.log_level != "INFO" {
+            log.file.level = x.log_level.to_string();
+        }
+        if x.log_dir != "./.databend/logs" {
+            log.file.dir = x.log_dir.to_string();
+        }
 
-    fn try_into(self) -> MetaResult<InnerConfig> {
-        Ok(InnerConfig {
-            config_file: self.config_file,
-            log_level: self.log_level,
-            log_dir: self.log_dir,
-            metric_api_address: self.metric_api_address,
-            admin_api_address: self.admin_api_address,
-            admin_tls_server_cert: self.admin_tls_server_cert,
-            admin_tls_server_key: self.admin_tls_server_key,
-            grpc_api_address: self.grpc_api_address,
-            grpc_tls_server_cert: self.grpc_tls_server_cert,
-            grpc_tls_server_key: self.grpc_tls_server_key,
-            raft_config: self.raft_config.try_into()?,
-        })
+        InnerConfig {
+            cmd: x.cmd,
+            key: x.key,
+            value: x.value,
+            prefix: x.prefix,
+            username: x.username,
+            password: x.password,
+            config_file: x.config_file,
+            log,
+            admin_api_address: x.admin_api_address,
+            admin_tls_server_cert: x.admin_tls_server_cert,
+            admin_tls_server_key: x.admin_tls_server_key,
+            grpc_api_address: x.grpc_api_address,
+            grpc_tls_server_cert: x.grpc_tls_server_cert,
+            grpc_tls_server_key: x.grpc_tls_server_key,
+            raft_config: x.raft_config.into(),
+        }
     }
 }
 
 impl From<InnerConfig> for Config {
     fn from(inner: InnerConfig) -> Self {
         Self {
+            cmd: inner.cmd,
+            key: inner.key,
+            value: inner.value,
+            prefix: inner.prefix,
+            username: inner.username,
+            password: inner.password,
             config_file: inner.config_file,
-            log_level: inner.log_level,
-            log_dir: inner.log_dir,
-            metric_api_address: inner.metric_api_address,
+            log_level: inner.log.file.level.clone(),
+            log_dir: inner.log.file.dir.clone(),
+            log: inner.log.into(),
             admin_api_address: inner.admin_api_address,
             admin_tls_server_cert: inner.admin_tls_server_cert,
             admin_tls_server_key: inner.admin_tls_server_key,
@@ -153,13 +201,17 @@ impl Config {
 /// #[serde(flatten)] doesn't work correctly for env.
 /// We should work around it by flatten them manully.
 /// We are seeking for better solutions.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ConfigViaEnv {
     pub metasrv_config_file: String,
     pub metasrv_log_level: String,
     pub metasrv_log_dir: String,
-    pub metasrv_metric_api_address: String,
+    pub metasrv_log_file_on: bool,
+    pub metasrv_log_file_level: String,
+    pub metasrv_log_file_dir: String,
+    pub metasrv_log_stderr_on: bool,
+    pub metasrv_log_stderr_level: String,
     pub admin_api_address: String,
     pub admin_tls_server_cert: String,
     pub admin_tls_server_key: String,
@@ -174,13 +226,14 @@ pub struct ConfigViaEnv {
     pub kvsrv_raft_dir: String,
     pub kvsrv_no_sync: bool,
     pub kvsrv_snapshot_logs_since_last: u64,
-    pub kvsrv_heartbeat_intervalt: u64,
+    pub kvsrv_heartbeat_interval: u64,
     pub kvsrv_install_snapshot_timeout: u64,
     pub raft_max_applied_log_to_keep: u64,
     pub kvsrv_single: bool,
     pub metasrv_join: Vec<String>,
     pub kvsrv_id: u64,
     pub sled_tree_prefix: String,
+    pub cluster_name: String,
 }
 
 impl Default for ConfigViaEnv {
@@ -193,9 +246,13 @@ impl From<Config> for ConfigViaEnv {
     fn from(cfg: Config) -> ConfigViaEnv {
         Self {
             metasrv_config_file: cfg.config_file,
-            metasrv_log_level: cfg.log_level,
-            metasrv_log_dir: cfg.log_dir,
-            metasrv_metric_api_address: cfg.metric_api_address,
+            metasrv_log_level: cfg.log.file.file_level.clone(),
+            metasrv_log_dir: cfg.log.file.file_dir.clone(),
+            metasrv_log_file_on: cfg.log.file.file_on,
+            metasrv_log_file_level: cfg.log.file.file_level,
+            metasrv_log_file_dir: cfg.log.file.file_dir,
+            metasrv_log_stderr_on: cfg.log.stderr.stderr_on,
+            metasrv_log_stderr_level: cfg.log.stderr.stderr_level,
             admin_api_address: cfg.admin_api_address,
             admin_tls_server_cert: cfg.admin_tls_server_cert,
             admin_tls_server_key: cfg.admin_tls_server_key,
@@ -209,13 +266,14 @@ impl From<Config> for ConfigViaEnv {
             kvsrv_raft_dir: cfg.raft_config.raft_dir,
             kvsrv_no_sync: cfg.raft_config.no_sync,
             kvsrv_snapshot_logs_since_last: cfg.raft_config.snapshot_logs_since_last,
-            kvsrv_heartbeat_intervalt: cfg.raft_config.heartbeat_interval,
+            kvsrv_heartbeat_interval: cfg.raft_config.heartbeat_interval,
             kvsrv_install_snapshot_timeout: cfg.raft_config.install_snapshot_timeout,
             raft_max_applied_log_to_keep: cfg.raft_config.max_applied_log_to_keep,
             kvsrv_single: cfg.raft_config.single,
             metasrv_join: cfg.raft_config.join,
             kvsrv_id: cfg.raft_config.id,
             sled_tree_prefix: cfg.raft_config.sled_tree_prefix,
+            cluster_name: cfg.raft_config.cluster_name,
         }
     }
 }
@@ -232,20 +290,43 @@ impl Into<Config> for ConfigViaEnv {
             raft_dir: self.kvsrv_raft_dir,
             no_sync: self.kvsrv_no_sync,
             snapshot_logs_since_last: self.kvsrv_snapshot_logs_since_last,
-            heartbeat_interval: self.kvsrv_heartbeat_intervalt,
+            heartbeat_interval: self.kvsrv_heartbeat_interval,
             install_snapshot_timeout: self.kvsrv_install_snapshot_timeout,
             max_applied_log_to_keep: self.raft_max_applied_log_to_keep,
             single: self.kvsrv_single,
             join: self.metasrv_join,
+            // Do not allow to leave via environment variable
+            leave_via: vec![],
+            // Do not allow to leave via environment variable
+            leave_id: None,
             id: self.kvsrv_id,
             sled_tree_prefix: self.sled_tree_prefix,
+            cluster_name: self.cluster_name,
+        };
+        let log_config = LogConfig {
+            file: FileLogConfig {
+                file_on: self.metasrv_log_file_on,
+                file_level: self.metasrv_log_file_level,
+                file_dir: self.metasrv_log_file_dir,
+            },
+            stderr: StderrLogConfig {
+                stderr_on: self.metasrv_log_stderr_on,
+                stderr_level: self.metasrv_log_stderr_level,
+            },
         };
 
         Config {
+            // cmd, key, value and prefix should only be passed in from CLI
+            cmd: "".to_string(),
+            key: vec![],
+            value: "".to_string(),
+            prefix: "".to_string(),
+            username: "".to_string(),
+            password: "".to_string(),
             config_file: self.metasrv_config_file,
             log_level: self.metasrv_log_level,
             log_dir: self.metasrv_log_dir,
-            metric_api_address: self.metasrv_metric_api_address,
+            log: log_config,
             admin_api_address: self.admin_api_address,
             admin_tls_server_cert: self.admin_tls_server_cert,
             admin_tls_server_key: self.admin_tls_server_key,
@@ -257,7 +338,7 @@ impl Into<Config> for ConfigViaEnv {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Parser)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Parser)]
 #[clap(about, version, author)]
 #[serde(default)]
 pub struct RaftConfig {
@@ -276,7 +357,7 @@ pub struct RaftConfig {
     /// This host should be stored in raft store and be replicated to the raft cluster,
     /// i.e., when calling add_node().
     /// Use `localhost` by default.
-    #[clap(long, default_value = "localhost")]
+    #[clap(long, default_value_t = get_default_raft_advertise_host())]
     pub raft_advertise_host: String,
 
     /// The listening port for metadata communication.
@@ -322,6 +403,16 @@ pub struct RaftConfig {
     #[clap(long, multiple_occurrences = true, multiple_values = true)]
     pub join: Vec<String>,
 
+    /// Do not run databend-meta, but just remove a node from its cluster via the provided endpoints.
+    ///
+    /// This node will be removed by `id`.
+    #[clap(long)]
+    pub leave_via: Vec<String>,
+
+    /// The node id to leave from a cluster.
+    #[clap(long)]
+    pub leave_id: Option<u64>,
+
     /// The node id. Only used when this server is not initialized,
     ///  e.g. --boot or --single for the first time.
     ///  Otherwise this argument is ignored.
@@ -331,6 +422,11 @@ pub struct RaftConfig {
     /// For test only: specifies the tree name prefix
     #[clap(long, default_value = "")]
     pub sled_tree_prefix: String,
+
+    /// Tne node name. If the user specifies a name, the user-supplied name is used,
+    /// if not, the default name is used
+    #[clap(long, default_value = "foo_cluster")]
+    pub cluster_name: String,
 }
 
 impl Default for RaftConfig {
@@ -339,30 +435,27 @@ impl Default for RaftConfig {
     }
 }
 
-impl TryInto<InnerRaftConfig> for RaftConfig {
-    type Error = MetaError;
-
-    fn try_into(self) -> MetaResult<InnerRaftConfig> {
-        let irc = InnerRaftConfig {
-            config_id: self.config_id,
-            raft_listen_host: self.raft_listen_host,
-            raft_advertise_host: self.raft_advertise_host,
-            raft_api_port: self.raft_api_port,
-            raft_dir: self.raft_dir,
-            no_sync: self.no_sync,
-            snapshot_logs_since_last: self.snapshot_logs_since_last,
-            heartbeat_interval: self.heartbeat_interval,
-            install_snapshot_timeout: self.install_snapshot_timeout,
-            max_applied_log_to_keep: self.max_applied_log_to_keep,
-            single: self.single,
-            join: self.join,
-            id: self.id,
-            sled_tree_prefix: self.sled_tree_prefix,
-        };
-
-        irc.check()?;
-
-        Ok(irc)
+impl From<RaftConfig> for InnerRaftConfig {
+    fn from(x: RaftConfig) -> InnerRaftConfig {
+        InnerRaftConfig {
+            config_id: x.config_id,
+            raft_listen_host: x.raft_listen_host,
+            raft_advertise_host: x.raft_advertise_host,
+            raft_api_port: x.raft_api_port,
+            raft_dir: x.raft_dir,
+            no_sync: x.no_sync,
+            snapshot_logs_since_last: x.snapshot_logs_since_last,
+            heartbeat_interval: x.heartbeat_interval,
+            install_snapshot_timeout: x.install_snapshot_timeout,
+            max_applied_log_to_keep: x.max_applied_log_to_keep,
+            single: x.single,
+            join: x.join,
+            leave_via: x.leave_via,
+            leave_id: x.leave_id,
+            id: x.id,
+            sled_tree_prefix: x.sled_tree_prefix,
+            cluster_name: x.cluster_name,
+        }
     }
 }
 
@@ -381,8 +474,129 @@ impl From<InnerRaftConfig> for RaftConfig {
             max_applied_log_to_keep: inner.max_applied_log_to_keep,
             single: inner.single,
             join: inner.join,
+            leave_via: inner.leave_via,
+            leave_id: inner.leave_id,
             id: inner.id,
             sled_tree_prefix: inner.sled_tree_prefix,
+            cluster_name: inner.cluster_name,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Args)]
+#[serde(default)]
+pub struct LogConfig {
+    #[clap(flatten)]
+    pub file: FileLogConfig,
+
+    #[clap(flatten)]
+    pub stderr: StderrLogConfig,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        InnerLogConfig::default().into()
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<InnerLogConfig> for LogConfig {
+    fn into(self) -> InnerLogConfig {
+        InnerLogConfig {
+            file: self.file.into(),
+            stderr: self.stderr.into(),
+        }
+    }
+}
+
+impl From<InnerLogConfig> for LogConfig {
+    fn from(inner: InnerLogConfig) -> Self {
+        Self {
+            file: inner.file.into(),
+            stderr: inner.stderr.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Args)]
+#[serde(default)]
+pub struct FileLogConfig {
+    /// Log level <DEBUG|INFO|ERROR>
+    #[clap(long = "log-file-on", default_value = "true")]
+    #[serde(rename = "on")]
+    pub file_on: bool,
+
+    #[clap(long = "log-file-level", default_value = "INFO")]
+    #[serde(rename = "level")]
+    pub file_level: String,
+
+    /// Log file dir
+    #[clap(long = "log-file-dir", default_value = "./.databend/logs")]
+    #[serde(rename = "dir")]
+    pub file_dir: String,
+}
+
+impl Default for FileLogConfig {
+    fn default() -> Self {
+        InnerFileLogConfig::default().into()
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<InnerFileLogConfig> for FileLogConfig {
+    fn into(self) -> InnerFileLogConfig {
+        InnerFileLogConfig {
+            on: self.file_on,
+            level: self.file_level,
+            dir: self.file_dir,
+        }
+    }
+}
+
+impl From<InnerFileLogConfig> for FileLogConfig {
+    fn from(inner: InnerFileLogConfig) -> Self {
+        Self {
+            file_on: inner.on,
+            file_level: inner.level,
+            file_dir: inner.dir,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Args)]
+#[serde(default)]
+pub struct StderrLogConfig {
+    /// Log level <DEBUG|INFO|ERROR>
+    #[clap(long = "log-stderr-on")]
+    #[serde(rename = "on")]
+    pub stderr_on: bool,
+
+    #[clap(long = "log-stderr-level", default_value = "INFO")]
+    #[serde(rename = "level")]
+    pub stderr_level: String,
+}
+
+impl Default for StderrLogConfig {
+    fn default() -> Self {
+        InnerStderrLogConfig::default().into()
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<InnerStderrLogConfig> for StderrLogConfig {
+    fn into(self) -> InnerStderrLogConfig {
+        InnerStderrLogConfig {
+            on: self.stderr_on,
+            level: self.stderr_level,
+        }
+    }
+}
+
+impl From<InnerStderrLogConfig> for StderrLogConfig {
+    fn from(inner: InnerStderrLogConfig) -> Self {
+        Self {
+            stderr_on: inner.on,
+            stderr_level: inner.level,
         }
     }
 }

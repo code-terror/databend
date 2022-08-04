@@ -15,23 +15,27 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use common_base::infallible::Mutex;
+use common_datavalues::DataSchemaRef;
 use common_exception::Result;
 use common_planners::PlanNode;
 use common_streams::ErrorStream;
 use common_streams::ProgressStream;
 use common_streams::SendableDataBlockStream;
+use parking_lot::Mutex;
 
 use crate::interpreters::access::ManagementModeAccess;
 use crate::interpreters::Interpreter;
 use crate::interpreters::InterpreterPtr;
 use crate::interpreters::InterpreterQueryLog;
-use crate::pipelines::new::SourcePipeBuilder;
+use crate::pipelines::SourcePipeBuilder;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
+use crate::sql::plans::Plan;
 
 pub struct InterceptorInterpreter {
     ctx: Arc<QueryContext>,
     plan: PlanNode,
+    new_plan: Option<Plan>,
     inner: InterpreterPtr,
     query_log: InterpreterQueryLog,
     source_pipe_builder: Mutex<Option<SourcePipeBuilder>>,
@@ -39,12 +43,19 @@ pub struct InterceptorInterpreter {
 }
 
 impl InterceptorInterpreter {
-    pub fn create(ctx: Arc<QueryContext>, inner: InterpreterPtr, plan: PlanNode) -> Self {
+    pub fn create(
+        ctx: Arc<QueryContext>,
+        inner: InterpreterPtr,
+        plan: PlanNode,
+        new_plan: Option<Plan>,
+        query_kind: String,
+    ) -> Self {
         InterceptorInterpreter {
             ctx: ctx.clone(),
-            plan: plan.clone(),
+            plan,
+            new_plan,
             inner,
-            query_log: InterpreterQueryLog::create(ctx.clone(), Some(plan)),
+            query_log: InterpreterQueryLog::create(ctx.clone(), query_kind),
             source_pipe_builder: Mutex::new(None),
             management_mode_access: ManagementModeAccess::create(ctx),
         }
@@ -57,17 +68,21 @@ impl Interpreter for InterceptorInterpreter {
         self.inner.name()
     }
 
-    async fn execute(
-        &self,
-        input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    fn schema(&self) -> DataSchemaRef {
+        self.inner.schema()
+    }
+
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         // Management mode access check.
-        self.management_mode_access.check(&self.plan)?;
+        match &self.new_plan {
+            Some(p) => self.management_mode_access.check_new(p)?,
+            _ => self.management_mode_access.check(&self.plan)?,
+        }
 
         let _ = self
             .inner
             .set_source_pipe_builder((*self.source_pipe_builder.lock()).clone());
-        let result_stream = match self.inner.execute(input_stream).await {
+        let result_stream = match self.inner.execute().await {
             Ok(s) => s,
             Err(e) => {
                 self.ctx.set_error(e.clone());

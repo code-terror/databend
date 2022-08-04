@@ -10,43 +10,22 @@ inputs:
   target:
     description: "Release target"
     required: true
-  tag:
-    description: "Release tag"
-    required: true
   aws_access_key_id:
     description: "AWS access key id"
     required: true
   aws_secret_access_key:
     description: "AWS secret access key"
     required: true
-  changelog:
-    description: "Release changelog"
-    required: true
 
 runs:
   using: "composite"
   steps:
-    - name: Release databend
-      uses: svenstaro/upload-release-action@v2
-      with:
-        repo_token: ${{ inputs.github_token }}
-        file: databend-${{ inputs.version }}-${{ inputs.target }}.*
-        asset_name: databend-${{ inputs.version }}-${{ inputs.target }}
-        tag: ${{ inputs.tag }}
-        file_glob: true
-        overwrite: true
-        body: ${{ inputs.changelog }}
-
-    - name: Release databend-tools
-      uses: svenstaro/upload-release-action@v2
-      with:
-        repo_token: ${{ inputs.github_token }}
-        file: databend-tools-${{ inputs.version }}-${{ inputs.target }}.*
-        asset_name: databend-tools-${{ inputs.version }}-${{ inputs.target }}
-        tag: ${{ inputs.tag }}
-        file_glob: true
-        overwrite: true
-        body: ${{ inputs.changelog }}
+    - name: Update release to github
+      shell: bash
+      # Reference: https://cli.github.com/manual/gh_release_upload
+      run: gh release upload ${{ inputs.version }} databend-${{ inputs.version }}-${{ inputs.target }}.* --clobber
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
 
     - name: Configure AWS Credentials
       uses: aws-actions/configure-aws-credentials@v1
@@ -59,7 +38,9 @@ runs:
       shell: bash
       run: |
         aws s3 cp databend-${{ inputs.version }}-${{ inputs.target }}.tar.gz s3://repo.databend.rs/databend/${{ inputs.version }}/databend-${{ inputs.version }}-${{ inputs.target }}.tar.gz
-        aws s3 cp databend-tools-${{ inputs.version }}-${{ inputs.target }}.tar.gz s3://repo.databend.rs/databend/${{ inputs.version }}/databend-tools-${{ inputs.version }}-${{ inputs.target }}.tar.gz
-        curl https://api.github.com/repos/datafuselabs/databend/tags > tags.json
+        curl --retry 3 -fsSLo tags.json \
+             --header 'content-type: application/json' \
+             --header 'authorization: Bearer ${{ inputs.github_token }}' \
+             https://api.github.com/repos/datafuselabs/databend/tags
         cat tags.json
         aws s3 cp ./tags.json s3://repo.databend.rs/databend/tags.json

@@ -20,11 +20,12 @@ use common_meta_types::AuthInfo;
 use common_meta_types::UserIdentity;
 use common_meta_types::UserOption;
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CreateUserPlan {
     pub user: UserIdentity,
     pub auth_info: AuthInfo,
     pub user_option: UserOption,
+    pub if_not_exists: bool,
 }
 
 impl CreateUserPlan {

@@ -11,39 +11,34 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-//
 
 use std::any::Any;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use common_base::infallible::Mutex;
-use common_base::infallible::RwLock;
 use common_datablocks::DataBlock;
-use common_datavalues::ColumnRef;
 use common_exception::Result;
-use common_meta_types::TableInfo;
+use common_meta_app::schema::TableInfo;
 use common_planners::Extras;
 use common_planners::Partitions;
 use common_planners::ReadDataSourcePlan;
 use common_planners::Statistics;
 use common_planners::TruncateTablePlan;
-use common_streams::SendableDataBlockStream;
+use parking_lot::Mutex;
+use parking_lot::RwLock;
 
-use crate::pipelines::new::processors::port::InputPort;
-use crate::pipelines::new::processors::port::OutputPort;
-use crate::pipelines::new::processors::processor::ProcessorPtr;
-use crate::pipelines::new::processors::Sink;
-use crate::pipelines::new::processors::Sinker;
-use crate::pipelines::new::processors::SyncSource;
-use crate::pipelines::new::processors::SyncSourcer;
-use crate::pipelines::new::NewPipeline;
-use crate::pipelines::new::SinkPipeBuilder;
-use crate::pipelines::new::SourcePipeBuilder;
-use crate::sessions::QueryContext;
+use crate::pipelines::processors::port::InputPort;
+use crate::pipelines::processors::port::OutputPort;
+use crate::pipelines::processors::processor::ProcessorPtr;
+use crate::pipelines::processors::ContextSink;
+use crate::pipelines::processors::SyncSource;
+use crate::pipelines::processors::SyncSourcer;
+use crate::pipelines::Pipeline;
+use crate::pipelines::SinkPipeBuilder;
+use crate::pipelines::SourcePipeBuilder;
+use crate::sessions::TableContext;
 use crate::storages::memory::memory_part::MemoryPartInfo;
-use crate::storages::memory::MemoryTableStream;
 use crate::storages::StorageContext;
 use crate::storages::StorageDescription;
 use crate::storages::Table;
@@ -134,7 +129,7 @@ impl Table for MemoryTable {
 
     async fn read_partitions(
         &self,
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         push_downs: Option<Extras>,
     ) -> Result<(Statistics, Partitions)> {
         let blocks = self.blocks.read();
@@ -180,43 +175,11 @@ impl Table for MemoryTable {
         Ok((statistics, parts))
     }
 
-    async fn read(
-        &self,
-        ctx: Arc<QueryContext>,
-        plan: &ReadDataSourcePlan,
-    ) -> Result<SendableDataBlockStream> {
-        let push_downs = &plan.push_downs;
-        let raw_blocks = self.blocks.read().clone();
-
-        let blocks = match push_downs {
-            Some(push_downs) => match &push_downs.projection {
-                Some(prj) => {
-                    let pruned_schema = Arc::new(self.table_info.schema().project(prj.clone()));
-                    let mut pruned_blocks = Vec::with_capacity(raw_blocks.len());
-
-                    for raw_block in raw_blocks {
-                        let raw_columns = raw_block.columns();
-                        let columns: Vec<ColumnRef> =
-                            prj.iter().map(|idx| raw_columns[*idx].clone()).collect();
-
-                        pruned_blocks.push(DataBlock::create(pruned_schema.clone(), columns))
-                    }
-
-                    pruned_blocks
-                }
-                None => raw_blocks,
-            },
-            None => raw_blocks,
-        };
-
-        Ok(Box::pin(MemoryTableStream::try_create(ctx, blocks)?))
-    }
-
     fn read2(
         &self,
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         plan: &ReadDataSourcePlan,
-        pipeline: &mut NewPipeline,
+        pipeline: &mut Pipeline,
     ) -> Result<()> {
         let settings = ctx.get_settings();
         let mut builder = SourcePipeBuilder::create();
@@ -239,31 +202,22 @@ impl Table for MemoryTable {
         Ok(())
     }
 
-    fn append2(&self, ctx: Arc<QueryContext>, pipeline: &mut NewPipeline) -> Result<()> {
+    fn append2(&self, ctx: Arc<dyn TableContext>, pipeline: &mut Pipeline) -> Result<()> {
         let mut sink_pipeline_builder = SinkPipeBuilder::create();
         for _ in 0..pipeline.output_len() {
             let input_port = InputPort::create();
             sink_pipeline_builder.add_sink(
                 input_port.clone(),
-                MemoryTableSink::create(input_port, ctx.clone()),
+                ContextSink::create(input_port, ctx.clone()),
             );
         }
-
         pipeline.add_pipe(sink_pipeline_builder.finalize());
         Ok(())
     }
 
-    async fn append_data(
-        &self,
-        _ctx: Arc<QueryContext>,
-        stream: SendableDataBlockStream,
-    ) -> Result<SendableDataBlockStream> {
-        Ok(Box::pin(stream))
-    }
-
     async fn commit_insertion(
         &self,
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         _catalog_name: &str,
         operations: Vec<DataBlock>,
         overwrite: bool,
@@ -287,7 +241,7 @@ impl Table for MemoryTable {
 
     async fn truncate(
         &self,
-        _ctx: Arc<QueryContext>,
+        _ctx: Arc<dyn TableContext>,
         _truncate_plan: TruncateTablePlan,
     ) -> Result<()> {
         let mut blocks = self.blocks.write();
@@ -303,7 +257,7 @@ struct MemoryTableSource {
 
 impl MemoryTableSource {
     pub fn create(
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         output: Arc<OutputPort>,
         data_blocks: Arc<Mutex<VecDeque<DataBlock>>>,
         extras: Option<Extras>,
@@ -317,7 +271,7 @@ impl MemoryTableSource {
     fn projection(&self, data_block: DataBlock) -> Result<Option<DataBlock>> {
         if let Some(extras) = &self.extras {
             if let Some(projection) = &extras.projection {
-                let pruned_schema = data_block.schema().project(projection.clone());
+                let pruned_schema = data_block.schema().project(projection);
                 let raw_columns = data_block.columns();
                 let columns = projection
                     .iter()
@@ -341,24 +295,5 @@ impl SyncSource for MemoryTableSource {
             None => Ok(None),
             Some(data_block) => self.projection(data_block),
         }
-    }
-}
-
-struct MemoryTableSink {
-    ctx: Arc<QueryContext>,
-}
-
-impl MemoryTableSink {
-    pub fn create(input: Arc<InputPort>, ctx: Arc<QueryContext>) -> ProcessorPtr {
-        Sinker::create(input, MemoryTableSink { ctx })
-    }
-}
-
-impl Sink for MemoryTableSink {
-    const NAME: &'static str = "MemoryTableSink";
-
-    fn consume(&mut self, data_block: DataBlock) -> Result<()> {
-        self.ctx.push_precommit_block(data_block);
-        Ok(())
     }
 }

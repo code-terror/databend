@@ -23,8 +23,9 @@ use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
 
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
+use crate::sessions::QueryAffect;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 
 pub struct SettingInterpreter {
     ctx: Arc<QueryContext>,
@@ -32,8 +33,8 @@ pub struct SettingInterpreter {
 }
 
 impl SettingInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, set: SettingPlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(SettingInterpreter { ctx, set }))
+    pub fn try_create(ctx: Arc<QueryContext>, set: SettingPlan) -> Result<Self> {
+        Ok(SettingInterpreter { ctx, set })
     }
 }
 
@@ -43,30 +44,40 @@ impl Interpreter for SettingInterpreter {
         "SettingInterpreter"
     }
 
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         let plan = self.set.clone();
         for var in plan.vars {
-            match var.variable.to_lowercase().as_str() {
+            let ok = match var.variable.to_lowercase().as_str() {
                 // To be compatible with some drivers
-                "sql_mode" | "autocommit" => {}
+                "sql_mode" | "autocommit" => false,
                 "timezone" => {
                     // check if the timezone is valid
                     let tz = var.value.trim_matches(|c| c == '\'' || c == '\"');
                     let _ = tz.parse::<Tz>().map_err(|_| {
                         ErrorCode::InvalidTimezone(format!("Invalid Timezone: {}", var.value))
                     })?;
-                    self.ctx
-                        .get_settings()
-                        .set_settings(var.variable, tz.to_string(), false)?;
+                    self.ctx.get_settings().set_settings(
+                        var.variable.clone(),
+                        tz.to_string(),
+                        var.is_global,
+                    )?;
+                    true
                 }
                 _ => {
-                    self.ctx
-                        .get_settings()
-                        .set_settings(var.variable, var.value, false)?;
+                    self.ctx.get_settings().set_settings(
+                        var.variable.clone(),
+                        var.value.clone(),
+                        var.is_global,
+                    )?;
+                    true
                 }
+            };
+            if ok {
+                self.ctx.set_affect(QueryAffect::ChangeSetting {
+                    key: var.variable.clone(),
+                    value: var.value.clone(),
+                    is_global: var.is_global,
+                })
             }
         }
 

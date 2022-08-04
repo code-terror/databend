@@ -20,22 +20,13 @@ use common_datavalues::DataType;
 use crate::AggregatorFinalPlan;
 use crate::AggregatorPartialPlan;
 use crate::BroadcastPlan;
-use crate::CallPlan;
-use crate::CopyPlan;
-use crate::CreateDatabasePlan;
-use crate::CreateRolePlan;
-use crate::CreateTablePlan;
-use crate::DropDatabasePlan;
-use crate::DropRolePlan;
-use crate::DropTablePlan;
 use crate::Expression;
 use crate::ExpressionPlan;
 use crate::LimitPlan;
 use crate::PlanNode;
 use crate::ProjectionPlan;
 use crate::ReadDataSourcePlan;
-use crate::RenameDatabasePlan;
-use crate::RenameTablePlan;
+use crate::RemotePlan;
 use crate::SortPlan;
 use crate::StagePlan;
 use crate::SubQueriesSetPlan;
@@ -65,26 +56,20 @@ impl<'a> fmt::Display for PlanNodeIndentFormatDisplay<'a> {
         match self.node {
             PlanNode::Stage(plan) => Self::format_stage(f, plan),
             PlanNode::Broadcast(plan) => Self::format_broadcast(f, plan),
+            PlanNode::Remote(plan) => Self::format_remote(f, plan),
             PlanNode::Projection(plan) => Self::format_projection(f, plan),
             PlanNode::Expression(plan) => Self::format_expression(f, plan),
             PlanNode::AggregatorPartial(plan) => Self::format_aggregator_partial(f, plan),
             PlanNode::AggregatorFinal(plan) => Self::format_aggregator_final(f, plan),
             PlanNode::Filter(plan) => write!(f, "Filter: {:?}", plan.predicate),
             PlanNode::Having(plan) => write!(f, "Having: {:?}", plan.predicate),
+            PlanNode::WindowFunc(plan) => {
+                write!(f, "WindowFunc: {:?}", plan.window_func)
+            }
             PlanNode::Sort(plan) => Self::format_sort(f, plan),
             PlanNode::Limit(plan) => Self::format_limit(f, plan),
             PlanNode::SubQueryExpression(plan) => Self::format_subquery_expr(f, plan),
             PlanNode::ReadSource(plan) => Self::format_read_source(f, plan),
-            PlanNode::CreateDatabase(plan) => Self::format_create_database(f, plan),
-            PlanNode::DropDatabase(plan) => Self::format_drop_database(f, plan),
-            PlanNode::RenameDatabase(plan) => Self::format_rename_database(f, plan),
-            PlanNode::CreateTable(plan) => Self::format_create_table(f, plan),
-            PlanNode::DropTable(plan) => Self::format_drop_table(f, plan),
-            PlanNode::RenameTable(plan) => Self::format_rename_table(f, plan),
-            PlanNode::CreateRole(plan) => Self::format_create_role(f, plan),
-            PlanNode::DropRole(plan) => Self::format_drop_role(f, plan),
-            PlanNode::Copy(plan) => Self::format_copy(f, plan),
-            PlanNode::Call(plan) => Self::format_call(f, plan),
             _ => {
                 let mut printed = true;
 
@@ -123,6 +108,17 @@ impl<'a> fmt::Display for PlanNodeIndentFormatDisplay<'a> {
 impl<'a> PlanNodeIndentFormatDisplay<'a> {
     fn format_stage(f: &mut Formatter, plan: &StagePlan) -> fmt::Result {
         write!(f, "RedistributeStage[expr: {:?}]", plan.scatters_expr)
+    }
+
+    fn format_remote(f: &mut Formatter, plan: &RemotePlan) -> fmt::Result {
+        match plan {
+            RemotePlan::V1(_) => write!(f, "Remote"),
+            RemotePlan::V2(v2_plan) => write!(
+                f,
+                "Remote[receive fragment: {}]",
+                v2_plan.receive_fragment_id
+            ),
+        }
     }
 
     fn format_broadcast(f: &mut Formatter, _plan: &BroadcastPlan) -> fmt::Result {
@@ -270,90 +266,5 @@ impl<'a> PlanNodeIndentFormatDisplay<'a> {
             }
         }
         Ok(())
-    }
-
-    fn format_create_database(f: &mut Formatter, plan: &CreateDatabasePlan) -> fmt::Result {
-        write!(f, "Create database {:},", plan.db)?;
-        write!(f, " if_not_exists:{:},", plan.if_not_exists)?;
-        if !plan.meta.engine.is_empty() {
-            write!(
-                f,
-                " engine: {}={:?},",
-                plan.meta.engine, plan.meta.engine_options
-            )?;
-        }
-        write!(f, " option: {:?}", plan.meta.options)
-    }
-
-    fn format_drop_database(f: &mut Formatter, plan: &DropDatabasePlan) -> fmt::Result {
-        write!(f, "Drop database {:},", plan.db)?;
-        write!(f, " if_exists:{:}", plan.if_exists)
-    }
-
-    fn format_create_role(f: &mut Formatter, plan: &CreateRolePlan) -> fmt::Result {
-        write!(f, "Create role {:}", plan.role_name)?;
-        write!(f, " if_not_exist:{:}", plan.if_not_exists)
-    }
-
-    fn format_drop_role(f: &mut Formatter, plan: &DropRolePlan) -> fmt::Result {
-        write!(f, "Drop role {:}", plan.role_name)?;
-        write!(f, " if_exists:{:}", plan.if_exists)
-    }
-
-    fn format_create_table(f: &mut Formatter, plan: &CreateTablePlan) -> fmt::Result {
-        write!(f, "Create table {:}.{:}", plan.db, plan.table)?;
-        write!(f, " {:},", plan.schema())?;
-        // need engine to impl Display
-        write!(f, " engine: {},", plan.engine())?;
-        write!(f, " if_not_exists:{:},", plan.if_not_exists)?;
-        write!(f, " option: {:?},", plan.options())?;
-        write!(f, " as_select: {:?}", plan.as_select())
-    }
-
-    fn format_drop_table(f: &mut Formatter, plan: &DropTablePlan) -> fmt::Result {
-        write!(f, "Drop table {:}.{:},", plan.db, plan.table)?;
-        write!(f, " if_exists:{:}", plan.if_exists)
-    }
-
-    fn format_rename_table(f: &mut Formatter, plan: &RenameTablePlan) -> fmt::Result {
-        write!(f, "Rename table,")?;
-        write!(f, " [")?;
-        for (i, entity) in plan.entities.iter().enumerate() {
-            write!(
-                f,
-                "{:}.{:} to {:}.{:}",
-                entity.database_name,
-                entity.table_name,
-                entity.new_database_name,
-                entity.new_table_name
-            )?;
-
-            if i + 1 != plan.entities.len() {
-                write!(f, ", ")?;
-            }
-        }
-        write!(f, "]")
-    }
-
-    fn format_rename_database(f: &mut Formatter, plan: &RenameDatabasePlan) -> fmt::Result {
-        write!(f, "Rename database,")?;
-        write!(f, " [")?;
-        for (i, entity) in plan.entities.iter().enumerate() {
-            write!(f, "{:} to {:}", entity.db, entity.new_db,)?;
-
-            if i + 1 != plan.entities.len() {
-                write!(f, ", ")?;
-            }
-        }
-        write!(f, "]")
-    }
-
-    fn format_copy(f: &mut Formatter, plan: &CopyPlan) -> fmt::Result {
-        write!(f, "{:?}", plan)
-    }
-
-    fn format_call(f: &mut Formatter, plan: &CallPlan) -> fmt::Result {
-        write!(f, "Call {:}", plan.name)?;
-        write!(f, " args: {:?}", plan.args)
     }
 }

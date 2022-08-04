@@ -12,33 +12,108 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod decorrelate;
 mod implement;
 mod rule_list;
+mod subquery_rewriter;
+
+use std::sync::Arc;
 
 use common_exception::Result;
+use once_cell::sync::Lazy;
 
+use super::rule::RuleID;
+use super::util::validate_distributed_query;
+use crate::sessions::QueryContext;
+use crate::sql::optimizer::heuristic::decorrelate::decorrelate_subquery;
 use crate::sql::optimizer::heuristic::implement::HeuristicImplementor;
-use crate::sql::optimizer::heuristic::rule_list::RuleList;
+pub use crate::sql::optimizer::heuristic::rule_list::RuleList;
+use crate::sql::optimizer::property::require_property;
 use crate::sql::optimizer::rule::TransformState;
+use crate::sql::optimizer::Distribution;
+use crate::sql::optimizer::RelExpr;
+use crate::sql::optimizer::RequiredProperty;
 use crate::sql::optimizer::SExpr;
+use crate::sql::plans::Exchange;
+use crate::sql::MetadataRef;
+
+pub static DEFAULT_REWRITE_RULES: Lazy<Vec<RuleID>> = Lazy::new(|| {
+    vec![
+        RuleID::NormalizeDisjunctiveFilter,
+        RuleID::NormalizeScalarFilter,
+        RuleID::EliminateFilter,
+        RuleID::EliminateEvalScalar,
+        RuleID::EliminateProject,
+        RuleID::MergeFilter,
+        RuleID::MergeEvalScalar,
+        RuleID::MergeProject,
+        RuleID::PushDownFilterEvalScalar,
+        RuleID::PushDownFilterProject,
+        RuleID::PushDownFilterJoin,
+        RuleID::SplitAggregate,
+    ]
+});
 
 /// A heuristic query optimizer. It will apply specific transformation rules in order and
 /// implement the logical plans with default implementation rules.
 pub struct HeuristicOptimizer {
     rules: RuleList,
     implementor: HeuristicImplementor,
+
+    _ctx: Arc<QueryContext>,
+    metadata: MetadataRef,
+
+    enable_distributed_optimization: bool,
 }
 
 impl HeuristicOptimizer {
-    pub fn create() -> Result<Self> {
-        Ok(HeuristicOptimizer {
-            rules: RuleList::create(vec![])?,
+    pub fn new(
+        ctx: Arc<QueryContext>,
+        metadata: MetadataRef,
+        rules: RuleList,
+        enable_distributed_optimization: bool,
+    ) -> Self {
+        HeuristicOptimizer {
+            rules,
             implementor: HeuristicImplementor::new(),
-        })
+
+            _ctx: ctx,
+            metadata,
+            enable_distributed_optimization,
+        }
     }
 
-    pub fn optimize(&mut self, expression: SExpr) -> Result<SExpr> {
-        let result = self.optimize_expression(&expression)?;
+    fn pre_optimize(&mut self, s_expr: SExpr) -> Result<SExpr> {
+        let result = decorrelate_subquery(self.metadata.clone(), s_expr)?;
+        Ok(result)
+    }
+
+    fn post_optimize(&mut self, s_expr: SExpr) -> Result<SExpr> {
+        Ok(s_expr)
+    }
+
+    pub fn optimize(&mut self, s_expr: SExpr) -> Result<SExpr> {
+        let pre_optimized = self.pre_optimize(s_expr)?;
+        let optimized = self.optimize_expression(&pre_optimized)?;
+        let post_optimized = self.post_optimize(optimized)?;
+        let mut result = self.implement_expression(&post_optimized)?;
+
+        if self.enable_distributed_optimization && validate_distributed_query(&result) {
+            let required = RequiredProperty {
+                distribution: Distribution::Any,
+            };
+            result = require_property(&required, &result)?;
+            let rel_expr = RelExpr::with_s_expr(&result);
+            let physical_prop = rel_expr.derive_physical_prop()?;
+            let root_required = RequiredProperty {
+                distribution: Distribution::Serial,
+            };
+            if !root_required.satisfied_by(&physical_prop) {
+                // Manually enforce serial distribution.
+                result = SExpr::create_unary(Exchange::Merge.into(), result);
+            }
+        }
+
         Ok(result)
     }
 
@@ -53,24 +128,41 @@ impl HeuristicOptimizer {
         Ok(result)
     }
 
-    fn apply_transform_rules(&self, s_expr: &SExpr, rule_list: &RuleList) -> Result<SExpr> {
-        let mut result = s_expr.clone();
+    fn implement_expression(&self, s_expr: &SExpr) -> Result<SExpr> {
+        let mut implemented_children = Vec::with_capacity(s_expr.arity());
+        for expr in s_expr.children() {
+            implemented_children.push(self.implement_expression(expr)?);
+        }
+        let implemented_expr = SExpr::create(s_expr.plan().clone(), implemented_children, None);
+        // Implement expression with Implementor
+        let mut state = TransformState::new();
+        self.implementor.implement(&implemented_expr, &mut state)?;
+        let result = if !state.results().is_empty() {
+            state.results()[0].clone()
+        } else {
+            implemented_expr
+        };
+        Ok(result)
+    }
 
+    // Return `None` if no rules matched
+    fn apply_transform_rules(&self, s_expr: &SExpr, rule_list: &RuleList) -> Result<SExpr> {
+        let mut s_expr = s_expr.clone();
         for rule in rule_list.iter() {
             let mut state = TransformState::new();
-            rule.apply(&result, &mut state)?;
-            if !state.results().is_empty() {
-                result = state.results()[0].clone();
+            if s_expr.match_pattern(rule.pattern()) && !s_expr.applied_rule(&rule.id()) {
+                rule.apply(&s_expr, &mut state)?;
+                s_expr.apply_rule(&rule.id());
+                if !state.results().is_empty() {
+                    // Recursive optimize the result
+                    let result = &state.results()[0];
+                    let optimized_result = self.optimize_expression(result)?;
+
+                    return Ok(optimized_result);
+                }
             }
         }
 
-        // Implement expression with Implementor
-        let mut state = TransformState::new();
-        self.implementor.implement(s_expr, &mut state)?;
-        if !state.results().is_empty() {
-            result = state.results()[0].clone();
-        }
-
-        Ok(result)
+        Ok(s_expr.clone())
     }
 }

@@ -19,11 +19,10 @@ use common_meta_types::PrincipalIdentity;
 use common_planners::RevokeRolePlan;
 use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
-use common_tracing::tracing;
 
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 
 #[derive(Debug)]
 pub struct RevokeRoleInterpreter {
@@ -32,8 +31,8 @@ pub struct RevokeRoleInterpreter {
 }
 
 impl RevokeRoleInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, plan: RevokeRolePlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(RevokeRoleInterpreter { ctx, plan }))
+    pub fn try_create(ctx: Arc<QueryContext>, plan: RevokeRolePlan) -> Result<Self> {
+        Ok(RevokeRoleInterpreter { ctx, plan })
     }
 }
 
@@ -43,11 +42,8 @@ impl Interpreter for RevokeRoleInterpreter {
         "RevokeRoleInterpreter"
     }
 
-    #[tracing::instrument(level = "debug", skip(self, _input_stream), fields(ctx.id = self.ctx.get_id().as_str()))]
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    #[tracing::instrument(level = "debug", skip(self), fields(ctx.id = self.ctx.get_id().as_str()))]
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         let plan = self.plan.clone();
         let tenant = self.ctx.get_tenant();
         let user_mgr = self.ctx.get_user_manager();

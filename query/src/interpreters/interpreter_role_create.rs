@@ -19,11 +19,10 @@ use common_meta_types::RoleInfo;
 use common_planners::CreateRolePlan;
 use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
-use common_tracing::tracing;
 
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 
 #[derive(Debug)]
 pub struct CreateRoleInterpreter {
@@ -32,8 +31,8 @@ pub struct CreateRoleInterpreter {
 }
 
 impl CreateRoleInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, plan: CreateRolePlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(CreateRoleInterpreter { ctx, plan }))
+    pub fn try_create(ctx: Arc<QueryContext>, plan: CreateRolePlan) -> Result<Self> {
+        Ok(CreateRoleInterpreter { ctx, plan })
     }
 }
 
@@ -43,17 +42,16 @@ impl Interpreter for CreateRoleInterpreter {
         "CreateRoleInterpreter"
     }
 
-    #[tracing::instrument(level = "debug", skip(self, _input_stream), fields(ctx.id = self.ctx.get_id().as_str()))]
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    #[tracing::instrument(level = "debug", skip(self), fields(ctx.id = self.ctx.get_id().as_str()))]
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         // TODO: add privilege check about CREATE ROLE
         let plan = self.plan.clone();
         let tenant = self.ctx.get_tenant();
         let user_mgr = self.ctx.get_user_manager();
         let role_info = RoleInfo::new(&plan.role_name);
-        user_mgr.add_role(&tenant, role_info, false).await?;
+        user_mgr
+            .add_role(&tenant, role_info, plan.if_not_exists)
+            .await?;
 
         Ok(Box::pin(DataBlockStream::create(
             self.plan.schema(),

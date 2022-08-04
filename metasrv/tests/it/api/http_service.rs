@@ -30,20 +30,20 @@ use crate::tests::tls_constants::TEST_SERVER_CERT;
 use crate::tests::tls_constants::TEST_SERVER_KEY;
 
 // TODO(zhihanz) add tls fail case
-#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[async_entry::test(worker_threads = 3, init = "init_meta_ut!()", tracing_span = "debug")]
 async fn test_http_service_tls_server() -> Result<()> {
-    let (_log_guards, ut_span) = init_meta_ut!();
-    let _ent = ut_span.enter();
-
     let mut conf = Config::default();
     let addr_str = "127.0.0.1:30002";
+    let grpc_api_addr = "127.0.0.1: 40002";
 
     conf.admin_tls_server_key = TEST_SERVER_KEY.to_owned();
     conf.admin_tls_server_cert = TEST_SERVER_CERT.to_owned();
     conf.admin_api_address = addr_str.to_owned();
     let tc = MetaSrvTestContext::new(0);
-    let meta_node = MetaNode::start(&tc.config.raft_config).await?;
-    meta_node.join_cluster(&tc.config.raft_config).await?;
+    let meta_node = MetaNode::start(&tc.config).await?;
+    meta_node
+        .join_cluster(&tc.config.raft_config, grpc_api_addr.to_string())
+        .await?;
 
     let mut srv = HttpService::create(conf, meta_node);
     // test cert is issued for "localhost"

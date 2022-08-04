@@ -5,18 +5,16 @@ description:
   Load data from local file system.
 ---
 
-<p align="center">
-<img src="https://datafuse-1253727613.cos.ap-hongkong.myqcloud.com/load/load-data-from-local-fs.png" width="550"/>
-</p>
+![image](../../public/img/load/load-data-from-local-fs.png)
 
 Using HTTP API `v1/streaming_load` to load data from local file into Databend.
-Currently, we only support CSV and Parquet file format.
+Currently, we support CSV, JSON and Parquet file format.
 
 > Note: CSV file should be UTF-8 character encoded if you have extra character set
 
 ### Before You Begin
 
-* **Databend :** Make sure Databend is running and accessible, see [How to deploy Databend](/doc/deploy).
+* **Databend :** Make sure Databend is running and accessible, see [How to deploy Databend](../10-deploy/02-deploying-databend.md).
 
 ### Step 1. Data Files for Loading
 

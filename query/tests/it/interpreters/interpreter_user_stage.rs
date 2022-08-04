@@ -15,36 +15,35 @@
 use common_base::base::tokio;
 use common_exception::Result;
 use common_meta_types::TenantQuota;
-use databend_query::interpreters::InterpreterFactory;
+use databend_query::interpreters::InterpreterFactoryV2;
+use databend_query::sessions::TableContext;
 use databend_query::sql::*;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_user_stage_interpreter() -> Result<()> {
-    common_tracing::init_default_ut_tracing();
-
     let ctx = crate::tests::create_query_context().await?;
+    let mut planner = Planner::new(ctx.clone());
 
     // add
     {
-        let query =
-            "CREATE STAGE test_stage url='s3://load/files/' credentials=(aws_key_id='1a2b3c' aws_secret_key='4x5y6z')";
-        let plan = PlanParser::parse(ctx.clone(), query).await?;
-        let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
+        let query = "CREATE STAGE test_stage url='s3://load/files/' credentials=(aws_key_id='1a2b3c' aws_secret_key='4x5y6z')";
+        let (plan, _, _) = planner.plan_sql(query).await?;
+        let executor = InterpreterFactoryV2::get(ctx.clone(), &plan)?;
         assert_eq!(executor.name(), "CreateUserStageInterpreter");
-        let mut stream = executor.execute(None).await?;
+        let mut stream = executor.execute().await?;
         while let Some(_block) = stream.next().await {}
     }
 
     // desc
     {
         let query = "DESC STAGE test_stage";
-        let plan = PlanParser::parse(ctx.clone(), query).await?;
-        let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
+        let (plan, _, _) = planner.plan_sql(query).await?;
+        let executor = InterpreterFactoryV2::get(ctx.clone(), &plan)?;
         assert_eq!(executor.name(), "DescribeUserStageInterpreter");
 
-        let mut stream = executor.execute(None).await?;
+        let mut stream = executor.execute().await?;
         let mut blocks = vec![];
 
         while let Some(block) = stream.next().await {
@@ -53,11 +52,11 @@ async fn test_user_stage_interpreter() -> Result<()> {
 
         common_datablocks::assert_blocks_eq(
             vec![
-                "+------------+------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------+--------------------------------------------------------------------------------------------------------------------+---------+",
-                "| name       | stage_type | stage_params                                                                                                                                                                                                       | copy_options                                  | file_format_options                                                                                                | comment |",
-                "+------------+------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------+--------------------------------------------------------------------------------------------------------------------+---------+",
-                r#"| test_stage | External   | StageParams { storage: S3(StorageS3Config { endpoint_url: "https://s3.amazonaws.com", region: "", bucket: "load", root: "/files/", access_key_id: "******b3c", secret_access_key: "******y6z", master_key: "" }) } | CopyOptions { on_error: None, size_limit: 0 } | FileFormatOptions { format: Csv, skip_header: 0, field_delimiter: ",", record_delimiter: "\n", compression: None } |         |"#,
-                "+------------+------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------+--------------------------------------------------------------------------------------------------------------------+---------+",
+                "+------------+------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------+--------------------------------------------------------------------------------------------------------------------+-----------------+--------------------+---------+",
+                "| name       | stage_type | stage_params                                                                                                                                                                                                                                                                          | copy_options                                  | file_format_options                                                                                                | number_of_files | creator            | comment |",
+                "+------------+------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------+--------------------------------------------------------------------------------------------------------------------+-----------------+--------------------+---------+",
+                r#"| test_stage | External   | StageParams { storage: S3(StorageS3Config { endpoint_url: "https://s3.amazonaws.com", region: "", bucket: "load", root: "/files/", disable_credential_loader: true, enable_virtual_host_style: false, access_key_id: "******b3c", secret_access_key: "******y6z", master_key: "" }) } | CopyOptions { on_error: None, size_limit: 0 } | FileFormatOptions { format: Csv, skip_header: 0, field_delimiter: ",", record_delimiter: "\n", compression: None } | NULL            | 'root'@'127.0.0.1' |         |"#,
+                "+------------+------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------+--------------------------------------------------------------------------------------------------------------------+-----------------+--------------------+---------+",
             ],
             &blocks,
         );
@@ -76,12 +75,11 @@ async fn test_user_stage_interpreter() -> Result<()> {
             ..Default::default()
         };
         quota_api.set_quota(&quota, None).await?;
-        let query =
-            "CREATE STAGE test_stage url='s3://load/files/' credentials=(aws_key_id='1a2b3c' aws_secret_key='4x5y6z')";
-        let plan = PlanParser::parse(ctx.clone(), query).await?;
-        let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
+        let query = "CREATE STAGE test_stage url='s3://load/files/' credentials=(aws_key_id='1a2b3c' aws_secret_key='4x5y6z')";
+        let (plan, _, _) = planner.plan_sql(query).await?;
+        let executor = InterpreterFactoryV2::get(ctx.clone(), &plan)?;
         assert_eq!(executor.name(), "CreateUserStageInterpreter");
-        let res = executor.execute(None).await;
+        let res = executor.execute().await;
         assert!(res.is_err());
         assert_eq!(
             res.err().unwrap().to_string(),
@@ -92,11 +90,11 @@ async fn test_user_stage_interpreter() -> Result<()> {
     // drop
     {
         let query = "DROP STAGE if exists test_stage";
-        let plan = PlanParser::parse(ctx.clone(), query).await?;
-        let executor = InterpreterFactory::get(ctx.clone(), plan.clone())?;
+        let (plan, _, _) = planner.plan_sql(query).await?;
+        let executor = InterpreterFactoryV2::get(ctx.clone(), &plan)?;
         assert_eq!(executor.name(), "DropUserStageInterpreter");
 
-        let mut stream = executor.execute(None).await?;
+        let mut stream = executor.execute().await?;
         while let Some(_block) = stream.next().await {}
     }
 

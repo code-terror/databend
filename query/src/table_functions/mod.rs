@@ -11,13 +11,12 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-//
 
 mod async_crash_me;
 mod memory_block_part;
 mod numbers_part;
-mod numbers_stream;
 mod numbers_table;
+mod sync_crash_me;
 mod table_function;
 mod table_function_factory;
 

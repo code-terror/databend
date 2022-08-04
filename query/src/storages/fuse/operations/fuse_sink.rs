@@ -11,33 +11,41 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-//
 
+use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_arrow::parquet::FileMetaData;
+use common_arrow::parquet::compression::CompressionOptions;
+use common_arrow::parquet::metadata::ThriftFileMetaData;
+use common_datablocks::serialize_data_blocks;
+use common_datablocks::serialize_data_blocks_with_compression;
 use common_datablocks::DataBlock;
-use common_datavalues::DataSchema;
-use common_datavalues::DataSchemaRef;
 use common_exception::ErrorCode;
 use common_exception::Result;
-use common_planners::Expression;
+use common_fuse_meta::meta::Location;
+use common_fuse_meta::meta::SegmentInfo;
+use common_fuse_meta::meta::Statistics;
 use opendal::Operator;
 
 use super::AppendOperationLogEntry;
-use crate::pipelines::new::processors::port::InputPort;
-use crate::pipelines::new::processors::processor::Event;
-use crate::pipelines::new::processors::processor::ProcessorPtr;
-use crate::pipelines::new::processors::Processor;
-use crate::pipelines::transforms::ExpressionExecutor;
-use crate::sessions::QueryContext;
-use crate::storages::fuse::io::serialize_data_blocks;
+use crate::pipelines::processors::port::InputPort;
+use crate::pipelines::processors::processor::Event;
+use crate::pipelines::processors::processor::ProcessorPtr;
+use crate::pipelines::processors::Processor;
+use crate::sessions::TableContext;
+use crate::storages::fuse::io;
 use crate::storages::fuse::io::TableMetaLocationGenerator;
-use crate::storages::fuse::meta::SegmentInfo;
-use crate::storages::fuse::meta::Statistics;
-use crate::storages::fuse::statistics::accumulator::BlockStatistics;
+use crate::storages::fuse::statistics::BlockStatistics;
 use crate::storages::fuse::statistics::StatisticsAccumulator;
+use crate::storages::index::BloomFilterIndexer;
+use crate::storages::index::ClusterKeyInfo;
+
+struct BloomIndexState {
+    data: Vec<u8>,
+    size: u64,
+    location: Location,
+}
 
 enum State {
     None,
@@ -45,8 +53,9 @@ enum State {
     Serialized {
         data: Vec<u8>,
         size: u64,
-        meta_data: Box<FileMetaData>,
+        meta_data: Box<ThriftFileMetaData>,
         block_statistics: BlockStatistics,
+        bloom_index_state: BloomIndexState,
     },
     GenerateSegment,
     SerializedSegment {
@@ -60,35 +69,32 @@ enum State {
 pub struct FuseTableSink {
     state: State,
     input: Arc<InputPort>,
-    ctx: Arc<QueryContext>,
+    ctx: Arc<dyn TableContext>,
     data_accessor: Operator,
     num_block_threshold: u64,
-    data_schema: DataSchemaRef,
     meta_locations: TableMetaLocationGenerator,
     accumulator: StatisticsAccumulator,
-    cluster_keys_index: Vec<usize>,
+    cluster_key_info: Option<ClusterKeyInfo>,
 }
 
 impl FuseTableSink {
-    pub fn create(
+    pub fn try_create(
         input: Arc<InputPort>,
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         num_block_threshold: usize,
         data_accessor: Operator,
-        data_schema: Arc<DataSchema>,
         meta_locations: TableMetaLocationGenerator,
-        cluster_keys_index: Vec<usize>,
+        cluster_key_info: Option<ClusterKeyInfo>,
     ) -> Result<ProcessorPtr> {
         Ok(ProcessorPtr::create(Box::new(FuseTableSink {
             ctx,
             input,
-            data_schema,
             data_accessor,
             meta_locations,
             state: State::None,
             accumulator: Default::default(),
             num_block_threshold: num_block_threshold as u64,
-            cluster_keys_index,
+            cluster_key_info,
         })))
     }
 }
@@ -97,6 +103,10 @@ impl FuseTableSink {
 impl Processor for FuseTableSink {
     fn name(&self) -> &'static str {
         "FuseSink"
+    }
+
+    fn as_any(&mut self) -> &mut dyn Any {
+        self
     }
 
     fn event(&mut self) -> Result<Event> {
@@ -136,60 +146,69 @@ impl Processor for FuseTableSink {
     fn process(&mut self) -> Result<()> {
         match std::mem::replace(&mut self.state, State::None) {
             State::NeedSerialize(data_block) => {
-                let cluster_stats = BlockStatistics::clusters_statistics(
-                    self.cluster_keys_index.clone(),
-                    data_block.clone(),
-                )?;
-
-                // Remove unused columns before serialize
-                let input_schema = data_block.schema().clone();
-                let block = if self.data_schema != input_schema {
-                    let exprs: Vec<Expression> = input_schema
-                        .fields()
-                        .iter()
-                        .map(|f| Expression::Column(f.name().to_owned()))
-                        .collect();
-
-                    let executor = ExpressionExecutor::try_create(
-                        self.ctx.clone(),
-                        "expression executor",
-                        input_schema,
-                        self.data_schema.clone(),
-                        exprs,
-                        true,
+                let mut cluster_stats = None;
+                let mut block = data_block;
+                if let Some(v) = &self.cluster_key_info {
+                    cluster_stats = BlockStatistics::clusters_statistics(
+                        v.cluster_key_id,
+                        &v.cluster_key_index,
+                        &block,
                     )?;
-                    executor.validate()?;
-                    executor.execute(&data_block)?
-                } else {
-                    data_block
+
+                    // Remove unused columns before serialize
+                    if let Some(executor) = &v.expression_executor {
+                        block = executor.execute(&block)?;
+                    }
+                }
+
+                let (block_location, block_id) = self.meta_locations.gen_block_location();
+
+                let bloom_index_state = {
+                    // write index
+                    let bloom_index = BloomFilterIndexer::try_create(self.ctx.clone(), &[&block])?;
+                    let index_block = bloom_index.bloom_block;
+                    let location = self.meta_locations.block_bloom_index_location(&block_id);
+                    let mut data = Vec::with_capacity(100 * 1024);
+                    let index_block_schema = &bloom_index.bloom_schema;
+                    let (size, _) = serialize_data_blocks_with_compression(
+                        vec![index_block],
+                        &index_block_schema,
+                        &mut data,
+                        CompressionOptions::Uncompressed,
+                    )?;
+                    BloomIndexState {
+                        data,
+                        size,
+                        location,
+                    }
                 };
 
-                let location = self.meta_locations.gen_block_location();
-                let block_statistics = BlockStatistics::from(&block, location, cluster_stats)?;
-
+                let block_statistics =
+                    BlockStatistics::from(&block, block_location.0, cluster_stats)?;
                 // we need a configuration of block size threshold here
                 let mut data = Vec::with_capacity(100 * 1024 * 1024);
                 let schema = block.schema().clone();
                 let (size, meta_data) = serialize_data_blocks(vec![block], &schema, &mut data)?;
+
                 self.state = State::Serialized {
                     data,
                     size,
                     block_statistics,
                     meta_data: Box::new(meta_data),
+                    bloom_index_state,
                 };
             }
             State::GenerateSegment => {
                 let acc = std::mem::take(&mut self.accumulator);
                 let col_stats = acc.summary()?;
-                let cluster_stats = acc.summary_clusters();
 
                 let segment_info = SegmentInfo::new(acc.blocks_metas, Statistics {
                     row_count: acc.summary_row_count,
                     block_count: acc.summary_block_count,
                     uncompressed_byte_size: acc.in_memory_size,
                     compressed_byte_size: acc.file_size,
+                    index_size: acc.index_size,
                     col_stats,
-                    cluster_stats,
                 });
 
                 self.state = State::SerializedSegment {
@@ -213,14 +232,33 @@ impl Processor for FuseTableSink {
                 size,
                 meta_data,
                 block_statistics,
+                bloom_index_state,
             } => {
-                self.data_accessor
-                    .object(&block_statistics.block_file_location)
-                    .write(data)
-                    .await?;
+                // write data block
+                io::write_data(
+                    &data,
+                    &self.data_accessor,
+                    &block_statistics.block_file_location,
+                )
+                .await?;
 
-                self.accumulator
-                    .add_block(size, *meta_data, block_statistics)?;
+                // write bloom filter index
+                io::write_data(
+                    &bloom_index_state.data,
+                    &self.data_accessor,
+                    &bloom_index_state.location.0,
+                )
+                .await?;
+
+                let bloom_filter_index_size = bloom_index_state.size;
+                self.accumulator.add_block(
+                    size,
+                    *meta_data,
+                    block_statistics,
+                    Some(bloom_index_state.location),
+                    bloom_filter_index_size,
+                )?;
+
                 if self.accumulator.summary_block_count >= self.num_block_threshold {
                     self.state = State::GenerateSegment;
                 }

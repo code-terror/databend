@@ -11,7 +11,6 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-//
 
 use std::any::Any;
 use std::mem::size_of;
@@ -24,28 +23,26 @@ use common_datavalues::chrono::Utc;
 use common_datavalues::prelude::*;
 use common_exception::ErrorCode;
 use common_exception::Result;
-use common_meta_types::TableIdent;
-use common_meta_types::TableInfo;
-use common_meta_types::TableMeta;
+use common_meta_app::schema::TableIdent;
+use common_meta_app::schema::TableInfo;
+use common_meta_app::schema::TableMeta;
 use common_planners::Expression;
 use common_planners::Extras;
 use common_planners::PartInfoPtr;
 use common_planners::Partitions;
 use common_planners::ReadDataSourcePlan;
 use common_planners::Statistics;
-use common_streams::SendableDataBlockStream;
 
-use super::numbers_stream::NumbersStream;
-use crate::pipelines::new::processors::port::OutputPort;
-use crate::pipelines::new::processors::processor::ProcessorPtr;
-use crate::pipelines::new::processors::EmptySource;
-use crate::pipelines::new::processors::SyncSource;
-use crate::pipelines::new::processors::SyncSourcer;
-use crate::pipelines::new::NewPipe;
-use crate::pipelines::new::NewPipeline;
-use crate::pipelines::new::SourcePipeBuilder;
-use crate::pipelines::transforms::get_sort_descriptions;
-use crate::sessions::QueryContext;
+use crate::pipelines::processors::port::OutputPort;
+use crate::pipelines::processors::processor::ProcessorPtr;
+use crate::pipelines::processors::transforms::get_sort_descriptions;
+use crate::pipelines::processors::EmptySource;
+use crate::pipelines::processors::SyncSource;
+use crate::pipelines::processors::SyncSourcer;
+use crate::pipelines::Pipe;
+use crate::pipelines::Pipeline;
+use crate::pipelines::SourcePipeBuilder;
+use crate::sessions::TableContext;
 use crate::storages::Table;
 use crate::table_functions::generate_numbers_parts;
 use crate::table_functions::numbers_part::NumbersPartInfo;
@@ -101,6 +98,7 @@ impl NumbersTable {
                 // Assuming that created_on is unnecessary for function table,
                 // we could make created_on fixed to pass test_shuffle_action_try_into.
                 created_on: Utc.from_utc_datetime(&NaiveDateTime::from_timestamp(0, 0)),
+                updated_on: Utc.from_utc_datetime(&NaiveDateTime::from_timestamp(0, 0)),
                 ..Default::default()
             },
         };
@@ -125,7 +123,7 @@ impl Table for NumbersTable {
 
     async fn read_partitions(
         &self,
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         push_downs: Option<Extras>,
     ) -> Result<(Statistics, Partitions)> {
         let max_block_size = ctx.get_settings().get_max_block_size()?;
@@ -178,32 +176,18 @@ impl Table for NumbersTable {
         ))])
     }
 
-    async fn read(
-        &self,
-        ctx: Arc<QueryContext>,
-        _plan: &ReadDataSourcePlan,
-    ) -> Result<SendableDataBlockStream> {
-        Ok(Box::pin(NumbersStream::try_create(
-            ctx,
-            self.schema(),
-            vec![],
-            None,
-        )?))
-    }
-
     fn read2(
         &self,
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         plan: &ReadDataSourcePlan,
-        pipeline: &mut NewPipeline,
+        pipeline: &mut Pipeline,
     ) -> Result<()> {
         if plan.parts.is_empty() {
-            let schema = plan.schema();
             let output = OutputPort::create();
-            pipeline.add_pipe(NewPipe::SimplePipe {
+            pipeline.add_pipe(Pipe::SimplePipe {
                 inputs_port: vec![],
                 outputs_port: vec![output.clone()],
-                processors: vec![EmptySource::create(ctx, output, schema)?],
+                processors: vec![EmptySource::create(output)?],
             });
 
             return Ok(());
@@ -241,7 +225,7 @@ struct NumbersSource {
 impl NumbersSource {
     pub fn create(
         output: Arc<OutputPort>,
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         numbers_part: &PartInfoPtr,
         schema: DataSchemaRef,
     ) -> Result<ProcessorPtr> {
@@ -258,7 +242,7 @@ impl NumbersSource {
 }
 
 impl SyncSource for NumbersSource {
-    const NAME: &'static str = "numbers";
+    const NAME: &'static str = "NumbersSourceTransform";
 
     fn generate(&mut self) -> Result<Option<DataBlock>> {
         let source_remain_size = self.end - self.begin;

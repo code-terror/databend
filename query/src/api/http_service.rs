@@ -17,14 +17,21 @@ use std::path::Path;
 use std::sync::Arc;
 
 use common_exception::Result;
-use common_tracing::tracing;
+use common_http::health_handler;
+use common_http::home::debug_home_handler;
+#[cfg(feature = "memory-profiling")]
+use common_http::jeprof::debug_jeprof_dump_handler;
+use common_http::pprof::debug_pprof_handler;
+use common_http::HttpShutdownHandler;
 use poem::get;
+use poem::listener::RustlsCertificate;
 use poem::listener::RustlsConfig;
 use poem::Endpoint;
 use poem::EndpointExt;
 use poem::Route;
+use tracing::info;
+use tracing::warn;
 
-use crate::common::service::HttpShutdownHandler;
 use crate::servers::Server;
 use crate::sessions::SessionManager;
 use crate::Config;
@@ -45,7 +52,7 @@ impl HttpService {
     fn build_router(&self) -> impl Endpoint {
         #[cfg_attr(not(feature = "memory-profiling"), allow(unused_mut))]
         let mut route = Route::new()
-            .at("/v1/health", get(super::http::v1::health::health_handler))
+            .at("/v1/health", get(health_handler))
             .at("/v1/config", get(super::http::v1::config::config_handler))
             .at("/v1/logs", get(super::http::v1::logs::logs_handler))
             .at("/v1/status", get(super::http::v1::status::status_handler))
@@ -53,14 +60,8 @@ impl HttpService {
                 "/v1/cluster/list",
                 get(super::http::v1::cluster::cluster_list_handler),
             )
-            .at(
-                "/debug/home",
-                get(super::http::debug::home::debug_home_handler),
-            )
-            .at(
-                "/debug/pprof/profile",
-                get(super::http::debug::pprof::debug_pprof_handler),
-            );
+            .at("/debug/home", get(debug_home_handler))
+            .at("/debug/pprof/profile", get(debug_pprof_handler));
 
         #[cfg(feature = "memory-profiling")]
         {
@@ -71,16 +72,17 @@ impl HttpService {
                 // and jeprof will translate the above url into sth like:
                 //    "http://localhost:8080/debug/mem/pprof/profile?seconds=30"
                 "/debug/mem/pprof/profile",
-                get(super::http::debug::jeprof::debug_jeprof_dump_handler),
+                get(debug_jeprof_dump_handler),
             );
         };
         route.data(self.sessions.clone())
     }
 
     fn build_tls(config: &Config) -> Result<RustlsConfig> {
-        let mut cfg = RustlsConfig::new()
+        let certificate = RustlsCertificate::new()
             .cert(std::fs::read(&config.query.api_tls_server_cert.as_str())?)
             .key(std::fs::read(&config.query.api_tls_server_key.as_str())?);
+        let mut cfg = RustlsConfig::new().fallback(certificate);
         if Path::new(&config.query.api_tls_server_root_ca_cert).exists() {
             cfg = cfg.client_auth_required(std::fs::read(
                 &config.query.api_tls_server_root_ca_cert.as_str(),
@@ -90,7 +92,7 @@ impl HttpService {
     }
 
     async fn start_with_tls(&mut self, listening: SocketAddr) -> Result<SocketAddr> {
-        tracing::info!("Http API TLS enabled");
+        info!("Http API TLS enabled");
 
         let tls_config = Self::build_tls(&self.sessions.get_conf())?;
         let addr = self
@@ -101,7 +103,7 @@ impl HttpService {
     }
 
     async fn start_without_tls(&mut self, listening: SocketAddr) -> Result<SocketAddr> {
-        tracing::warn!("Http API TLS not set");
+        warn!("Http API TLS not set");
 
         let addr = self
             .shutdown_handler

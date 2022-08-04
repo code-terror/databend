@@ -22,13 +22,12 @@ use common_base::base::tokio::net::TcpListener;
 use common_base::base::tokio::sync::Notify;
 use common_exception::ErrorCode;
 use common_exception::Result;
-use common_tracing::tracing;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Identity;
 use tonic::transport::Server;
 use tonic::transport::ServerTlsConfig;
+use tracing::info;
 
-use crate::api::rpc::DatabendQueryFlightDispatcher;
 use crate::api::rpc::DatabendQueryFlightService;
 use crate::servers::Server as DatabendQueryServer;
 use crate::sessions::SessionManager;
@@ -37,7 +36,6 @@ use crate::Config;
 pub struct RpcService {
     pub sessions: Arc<SessionManager>,
     pub abort_notify: Arc<Notify>,
-    pub dispatcher: Arc<DatabendQueryFlightDispatcher>,
 }
 
 impl RpcService {
@@ -45,7 +43,6 @@ impl RpcService {
         Box::new(Self {
             sessions,
             abort_notify: Arc::new(Notify::new()),
-            dispatcher: Arc::new(DatabendQueryFlightDispatcher::create()),
         })
     }
 
@@ -74,12 +71,11 @@ impl RpcService {
 
     pub async fn start_with_incoming(&mut self, listener_stream: TcpListenerStream) -> Result<()> {
         let sessions = self.sessions.clone();
-        let flight_dispatcher = self.dispatcher.clone();
-        let flight_api_service = DatabendQueryFlightService::create(flight_dispatcher, sessions);
+        let flight_api_service = DatabendQueryFlightService::create(sessions);
         let conf = self.sessions.get_conf();
         let builder = Server::builder();
         let mut builder = if conf.tls_rpc_server_enabled() {
-            tracing::info!("databend query tls rpc enabled");
+            info!("databend query tls rpc enabled");
             builder
                 .tls_config(Self::server_tls_config(&conf).await.map_err(|e| {
                     ErrorCode::TLSConfigurationFailure(format!(
@@ -97,20 +93,14 @@ impl RpcService {
             .add_service(FlightServiceServer::new(flight_api_service))
             .serve_with_incoming_shutdown(listener_stream, self.shutdown_notify());
 
-        common_base::base::tokio::spawn(server);
+        tokio::spawn(server);
         Ok(())
     }
 }
 
 #[async_trait::async_trait]
 impl DatabendQueryServer for RpcService {
-    async fn shutdown(&mut self, graceful: bool) {
-        if graceful {
-            self.dispatcher.abort();
-        }
-        // We can't turn off listening on the connection
-        // self.abort_notify.notify_waiters();
-    }
+    async fn shutdown(&mut self, _graceful: bool) {}
 
     async fn start(&mut self, listening: SocketAddr) -> Result<SocketAddr> {
         let (listener_stream, listener_addr) = Self::listener_tcp(listening).await?;

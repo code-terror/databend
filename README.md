@@ -1,12 +1,11 @@
+<img src="https://repository-images.githubusercontent.com/302827809/a01c8064-0196-45d9-b326-1762d6d3062b" alt="databend" />
 <div align="center">
-
-<p align="center"><img alt="Databend Logo" src="website/static/img/favicon.svg" width="20%"/></p>
-<p align="center">A Modern Cloud Data Warehouse with the Elasticity and Performance both on Object Storage</p>
  
 <h4 align="center">
+  <a href="https://databend.rs/doc/cloud">Databend Serverless Cloud (beta)</a>  |
   <a href="https://databend.rs/doc">Documentation</a>  |
   <a href="https://perf.databend.rs">Benchmarking</a>  |
-  <a href="https://github.com/datafuselabs/databend/issues/4591">Roadmap(v0.8)</a>
+  <a href="https://github.com/datafuselabs/databend/issues/4591">Roadmap (v0.8)</a>
 
 </h4>
 
@@ -19,7 +18,7 @@
 <img src="https://img.shields.io/github/workflow/status/datafuselabs/databend/Release" alt="CI Status" />
 </a>
 
-<img src="https://img.shields.io/badge/Platform-Linux%2C%20macOS%2C%20ARM-green.svg?style=flat" alt="patform" />
+<img src="https://img.shields.io/badge/Platform-Linux%2C%20macOS%2C%20ARM-green.svg?style=flat" alt="Linux Platform" />
 
 <a href="https://opensource.org/licenses/Apache-2.0">
 <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="license" />
@@ -30,11 +29,10 @@
 <br>
 
 - [What is Databend?](#what-is-databend)
-- [Design Overview](#design-overview)
-   - [Meta Service Layer](#meta-service-layer)
-   - [Compute Layer](#compute-layer)
-   - [Storage Layer](#storage-layer)
+- [Architecture](#architecture)
+- [Try Databend](#try-databend)
 - [Getting Started](#getting-started)
+- [Contributing](#contributing)
 - [Community](#community)
 - [Roadmap](#roadmap)
 
@@ -51,6 +49,11 @@ Databend uses the latest techniques in vectorized query processing to allow you 
 - __Blazing Performance__
 
   Databend leverages data-level parallelism(Vectorized Query Execution) and instruction-level parallelism(SIMD) technology, offering blazing performance data analytics.
+  
+  
+- __Git-like Storage__
+
+  Databend stores data with snapshots. It's easy to query, clone, and restore historical data in tables.
 
 - __Support for Semi-Structured Data__
 
@@ -64,147 +67,97 @@ Databend uses the latest techniques in vectorized query processing to allow you 
 
   Databend has no indexes to build, no manual tuning required, no manual figuring out partitions or shard data, it’s all done for you as data is loaded into the table.
  
-## Design Overview
+## Architecture
 
-This is the high-level architecture of Databend. It consists of three components:
-- `meta service layer`
-- `compute layer`
-- `storage layer`
+![databend-arch](https://user-images.githubusercontent.com/172204/181448994-2b7c1623-6b20-4398-8917-45acca95ba90.png)
 
-![Databend Architecture](https://datafuse-1253727613.cos.ap-hongkong.myqcloud.com/arch/datafuse-arch-20210817.svg)
 
-### Meta Service Layer
+## Try Databend
 
-The meta service is a layer to service multiple tenants. This layer implements a persistent key-value store to store each tenant's state.
-In the current implementation, the meta service has many components:
+### 1. Databend Serverless Cloud
 
-- Metadata, which manages all metadata of databases, tables, clusters, the transaction, etc.
-- Administration, which stores user info, user management, access control information, usage statistics, etc.
-- Security, which performs authorization and authentication to protect the privacy of users' data.
+The fastest way to try Databend, [Databend Cloud](https://databend.rs/doc/cloud/)
 
-The code of `Meta Service Layer` mainly resides in the `metasrv` directory of the repository.
+### 2. Install Databend from Docker
 
-### Compute Layer
+Prepare the image (once) from Docker Hub (this will download about 170 MB data):
 
-The compute layer is the layer that carries out computation for query processing. This layer may consist of many clusters,
-and each cluster may consist of many nodes. Each node is a computing unit and is a collection of components:
+```shell
+docker pull datafuselabs/databend
+```
 
-- **Planner**
-
-  The query planner builds an execution plan from the user's SQL statement and represents the query with different types of relational operators (such as `Projection`, `Filter`, `Limit`, etc.).
-
-  For example:
-  ```
-  databend :) EXPLAIN SELECT avg(number) FROM numbers(100000) GROUP BY number % 3
-  ┌─explain─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-  │ Projection: avg(number):Float64                                                                                                                                                         │
-  │   AggregatorFinal: groupBy=[[(number % 3)]], aggr=[[avg(number)]]                                                                                                                       │
-  │     AggregatorPartial: groupBy=[[(number % 3)]], aggr=[[avg(number)]]                                                                                                                   │
-  │       Expression: (number % 3):UInt8, number:UInt64 (Before GroupBy)                                                                                                                    │
-  │         ReadDataSource: scan schema: [number:UInt64], statistics: [read_rows: 100000, read_bytes: 800000, partitions_scanned: 11, partitions_total: 11], push_downs: [projections: [0]] │
-  └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-  ```
-
-- **Optimizer**
-
-  A rule-based optimizer, some rules like predicate push down or pruning of unused columns.
-
-- **Processors**
-
-  A Pull&Push-Based query execution pipeline, which is built by planner instructions.
-  Each pipeline executor is a processor(such as `SourceTransform`, `FilterTransform`, etc.), it has zero or more inputs and zero or more outputs, and connected as a pipeline, it also can be distributed on multiple nodes judged by your query workload.
-
-  For example:
-  ```
-  databend :) EXPLAIN PIPELINE SELECT avg(number) FROM numbers(100000) GROUP BY number % 3
-  ┌─explain────────────────────────────────────────────────────────────────────────────────┐
-  │ ProjectionTransform × 16 processors                                                    │
-  │   Mixed (GroupByFinalTransform × 1 processor) to (ProjectionTransform × 16 processors) │
-  │     GroupByFinalTransform × 1 processor                                                │
-  │       Merge (GroupByPartialTransform × 16 processors) to (GroupByFinalTransform × 1)   │
-  │         GroupByPartialTransform × 16 processors                                        │
-  │           ExpressionTransform × 16 processors                                          │
-  │             SourceTransform × 16 processors                                            │
-  └────────────────────────────────────────────────────────────────────────────────────────┘
-  ```
-
-Node is the smallest unit of the compute layer. A set of nodes can be registered as one cluster via namespace.
-Many clusters can attach the same database, so they can serve the query in parallel by different users.
-When you add new nodes to a cluster, the currently running computational tasks can be scaled(known as work-stealing) guarantee.
-
-The `Compute Layer` codes are mainly in the `query` directory.
-
-### Storage Layer
-
-Databend stores data in an efficient, columnar format as Parquet files.
-Each Parquet file is sorted by the primary key before being written to the underlying shared storage.
-For efficient pruning, Databend also creates indexes for each Parquet file:
-
-- `min_max.idx` The index file stores the *minimum* and *maximum* value of this Parquet file.
-- `sparse.idx` The index file store the <key, parquet-page> mapping for every [N] records granularity.
-
-With the indexes, we can speed up the queries by reducing the I/O and CPU costs.
-Imagine that Parquet file f1 has `min_max.idx` of `[3, 5)` and Parquet file f2 has `min_max.idx` of `[4, 6)` in column `x` if the query predicate is `WHERE x < 4`, only f1 needs to be accessed and processed.
+To run Databend quickly:
+```shell
+docker run --net=host  datafuselabs/databend
+```
 
 ## Getting Started
 
-### Deployment
+### Deploying Databend
 
-- [How to Deploy Databend With MinIO](https://databend.rs/doc/deploy/minio)
-- [How to Deploy Databend With AWS S3](https://databend.rs/doc/deploy/s3)
-- [How to Deploy Databend With Azure Blob Storage](https://databend.rs/doc/deploy/azure)
-- [How to Deploy Databend With Wasabi Object Storage](https://databend.rs/doc/deploy/wasabi)
-- [How to Deploy Databend With Scaleway OS](https://databend.rs/doc/deploy/scw)
-- [How to Deploy Databend With Tencent COS](https://databend.rs/doc/deploy/cos)
-- [How to Deploy Databend With Alibaba OSS](https://databend.rs/doc/deploy/oss)
-- [How to Deploy Databend With QingCloud QingStore](https://databend.rs/doc/deploy/qingstore)
-- [How to Deploy a Databend Local Cluster With MinIO](https://databend.rs/doc/deploy/local)
-- [How to Deploy a Databend K8s Cluster With MinIO](https://databend.rs/doc/deploy/cluster-minio)
+- [Understanding Deployment Modes](https://databend.rs/doc/deploy/understanding-deployment-modes)
+- [Deploying a Standalone Databend](https://databend.rs/doc/deploy/deploying-databend)
+- [Expanding a Standalone Databend](https://databend.rs/doc/deploy/expanding-to-a-databend-cluster)
+- [Databend Cloud (Beta)](https://databend.rs/doc/cloud)
  
-### Connect
+### Connecting to Databend
 
-- [How to Connect Databend With MySQL Client](https://databend.rs/doc/reference/api/mysql-handler)
-- [How to Connect Databend With ClickHouse Client](https://databend.rs/doc/reference/api/clickhouse-handler)
-- [How to Connect Databend With DBeaver SQL IDE](https://databend.rs/doc/integrations/gui-tool/dbeaver)
+- [How to Connect Databend with MySQL Client](https://databend.rs/doc/reference/api/mysql-handler)
+- [How to Connect Databend with ClickHouse Client](https://databend.rs/doc/reference/api/clickhouse-handler)
+- [How to Connect Databend with DBeaver SQL IDE](https://databend.rs/doc/integrations/gui-tool/dbeaver)
 - [How to Execute Queries in Python](https://databend.rs/doc/develop/python)
 - [How to Query Databend in Jupyter Notebooks](https://databend.rs/doc/integrations/gui-tool/jupyter)
 - [How to Execute Queries in Golang](https://databend.rs/doc/develop/golang)
-- [How to Work With Databend in Node.js](https://databend.rs/doc/develop/nodejs)
+- [How to Work with Databend in Node.js](https://databend.rs/doc/develop/nodejs)
 
+### Loading Data into Databend
 
-### Users
+- [How to Load Data from Local File System](https://databend.rs/doc/load-data/local)
+- [How to Load Data from Remote Files](https://databend.rs/doc/load-data/remote)
+- [How to Load Data from Amazon S3](https://databend.rs/doc/load-data/s3)
+- [How to Load Data from Databend Stages](https://databend.rs/doc/load-data/stage)
+- [How to Load Data from MySQL](https://databend.rs/doc/load-data/mysql)
+
+### Managing Users
 
 - [How to Create a User](https://databend.rs/doc/reference/sql/ddl/user/user-create-user)
 - [How to Grant Privileges to a User](https://databend.rs/doc/reference/sql/ddl/user/grant-privileges)
-- [How to Revoke Privileges From a User](https://databend.rs/doc/reference/sql/ddl/user/revoke-privileges)
+- [How to Revoke Privileges from a User](https://databend.rs/doc/reference/sql/ddl/user/revoke-privileges)
 - [How to Create a Role](https://databend.rs/doc/reference/sql/ddl/user/user-create-role)
 - [How to Grant Privileges to a Role](https://databend.rs/doc/reference/sql/ddl/user/grant-privileges)
 - [How to Grant Role to a User](https://databend.rs/doc/reference/sql/ddl/user/grant-role)
-- [How to Revoke Role From a User](https://databend.rs/doc/reference/sql/ddl/user/revoke-role)
+- [How to Revoke Role from a User](https://databend.rs/doc/reference/sql/ddl/user/revoke-role)
  
-### Tables
+### Managing Databases
 
 - [How to Create a Database](https://databend.rs/doc/reference/sql/ddl/database/ddl-create-database)
 - [How to Drop a Database](https://databend.rs/doc/reference/sql/ddl/database/ddl-drop-database)
+
+### Managing Tables
+
 - [How to Create a Table](https://databend.rs/doc/reference/sql/ddl/table/ddl-create-table)
 - [How to Drop a Table](https://databend.rs/doc/reference/sql/ddl/table/ddl-drop-table)
 - [How to Rename a Table](https://databend.rs/doc/reference/sql/ddl/table/ddl-rename-table)
 - [How to Truncate a Table](https://databend.rs/doc/reference/sql/ddl/table/ddl-truncate-table)
 
-### Views
+### Managing Views
 
 - [How to Create a View](https://databend.rs/doc/reference/sql/ddl/view/ddl-create-view)
 - [How to Drop a View](https://databend.rs/doc/reference/sql/ddl/view/ddl-drop-view)
 - [How to Alter a View](https://databend.rs/doc/reference/sql/ddl/view/ddl-alter-view)
- 
-### Load Data
 
-- [How to Load Data From Local File System](https://databend.rs/doc/load-data/local)
-- [How to Load Data From Amazon S3](https://databend.rs/doc/load-data/s3)
-- [How to Load Data From Databend Stages](https://databend.rs/doc/load-data/stage)
-- [How to Load Data From MySQL](https://databend.rs/doc/load-data/mysql)
+### Managing User-Defined Functions
 
-### Use Case
+- [How to Create a User-Defined Function](http://databend.rs/doc/reference/sql/ddl/udf/ddl-create-function)
+- [How to Drop a User-Defined Function](http://databend.rs/doc/reference/sql/ddl/udf/ddl-drop-function)
+- [How to Alter a User-Defined Function](http://databend.rs/doc/reference/sql/ddl/udf/ddl-alter-function)
+
+### Backup & Restore
+
+* [How to Back Up Meta Data](https://databend.rs/doc/manage/metasrv/metasrv-backup-restore)
+* [How to Back Up Databases](https://databend.rs/doc/manage/backup-restore/backup-and-restore-schema)
+
+### Use Cases
 
 - [Analyzing Github Repository With Databend](https://databend.rs/doc/learn/analyze-github-repo-with-databend)
 - [Analyzing Nginx Access Logs With Databend](https://databend.rs/doc/learn/analyze-nginx-logs-with-databend-and-vector)
@@ -214,6 +167,17 @@ Imagine that Parquet file f1 has `min_max.idx` of `[3, 5)` and Parquet file f2 h
 ### Performance
 
 - [How to Benchmark Databend](https://databend.rs/doc/learn/analyze-ontime-with-databend-on-ec2-and-s3)
+
+
+## Contributing
+
+Databend is an open source project, you can help with ideas, code, or documentation, we appreciate any efforts that help us to make the project better!
+Once the code been merged, your name will be stored in the **system.contributors** table forever.
+
+To get started with contributing:
+
+- [Building Databend From Source](https://databend.rs/doc/contributing/building-from-source)
+- [The First Good Pull Request](https://databend.rs/doc/contributing/good-pr)
 
 
 ## Community
@@ -238,3 +202,5 @@ Databend is licensed under [Apache 2.0](LICENSE).
 
 - Databend is inspired by [ClickHouse](https://github.com/clickhouse/clickhouse) and [Snowflake](https://docs.snowflake.com/en/user-guide/intro-key-concepts.html#snowflake-architecture), its computing model is based on [apache-arrow](https://arrow.apache.org/).
 - The [documentation website](https://databend.rs) hosted by [Vercel](https://vercel.com/?utm_source=databend&utm_campaign=oss).
+- Thanks to [Mergify](https://mergify.com/) for sponsoring advanced features like Batch Merge.
+- Thanks to [QingCloud](https://qingcloud.com) for sponsoring CI resources.

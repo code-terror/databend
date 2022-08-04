@@ -24,32 +24,26 @@ use common_exception::Result;
 use common_functions::scalars::check_pattern_type;
 use common_functions::scalars::FunctionFactory;
 use common_functions::scalars::PatternType;
+use common_fuse_meta::meta::StatisticsOfColumns;
 use common_planners::lit;
 use common_planners::Expression;
 use common_planners::ExpressionMonotonicityVisitor;
 use common_planners::Expressions;
 use common_planners::RequireColumnsVisitor;
 
-use crate::pipelines::transforms::ExpressionExecutor;
-use crate::sessions::QueryContext;
+use crate::pipelines::processors::transforms::ExpressionExecutor;
+use crate::sessions::TableContext;
 
-pub type ColumnsStatistics = HashMap<u32, ColumnStatistics>;
-
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-pub struct ColumnStatistics {
-    pub min: DataValue,
-    pub max: DataValue,
-    pub null_count: u64,
-    pub in_memory_size: u64,
+#[derive(Clone)]
+pub struct ClusterKeyInfo {
+    pub cluster_key_id: u32,
+    pub cluster_key_index: Vec<usize>,
+    pub exprs: Vec<Expression>,
+    pub expression_executor: Option<ExpressionExecutor>,
+    pub data_schema: DataSchemaRef,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-pub struct ClusterStatistics {
-    pub min: Vec<DataValue>,
-    pub max: Vec<DataValue>,
-}
-
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RangeFilter {
     origin: DataSchemaRef,
     schema: DataSchemaRef,
@@ -59,7 +53,7 @@ pub struct RangeFilter {
 
 impl RangeFilter {
     pub fn try_create(
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         expr: &Expression,
         schema: DataSchemaRef,
     ) -> Result<Self> {
@@ -90,7 +84,8 @@ impl RangeFilter {
         })
     }
 
-    pub fn eval(&self, stats: &ColumnsStatistics) -> Result<bool> {
+    #[tracing::instrument(level = "debug", name = "range_filter_eval", skip_all)]
+    pub fn eval(&self, stats: &StatisticsOfColumns) -> Result<bool> {
         let mut columns = Vec::with_capacity(self.stat_columns.len());
         for col in self.stat_columns.iter() {
             let val_opt = col.apply_stat_value(stats, self.origin.clone())?;
@@ -211,7 +206,7 @@ impl StatColumn {
 
     fn apply_stat_value(
         &self,
-        stats: &ColumnsStatistics,
+        stats: &StatisticsOfColumns,
         schema: DataSchemaRef,
     ) -> Result<Option<ColumnRef>> {
         if self.stat_type == StatType::Nulls {
@@ -313,7 +308,7 @@ impl<'a> VerifiableExprBuilder<'a> {
                     (0, 0) => {
                         return Err(ErrorCode::UnknownException(
                             "Constant expression donot need to be handled",
-                        ))
+                        ));
                     }
                     (_, 0) => (vec![exprs[0].clone(), exprs[1].clone()], vec![lhs_cols], op),
                     (0, _) => {

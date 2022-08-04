@@ -22,11 +22,13 @@ use common_planners::ExplainType;
 use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
 
+use crate::interpreters::fragments::QueryFragmentsBuilder;
+use crate::interpreters::fragments::RootQueryFragment;
 use crate::interpreters::plan_schedulers;
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
+use crate::interpreters::QueryFragmentsActions;
 use crate::optimizers::Optimizers;
-use crate::pipelines::processors::PipelineBuilder;
+use crate::pipelines::QueryPipelineBuilder;
 use crate::sessions::QueryContext;
 
 pub struct ExplainInterpreter {
@@ -40,29 +42,27 @@ impl Interpreter for ExplainInterpreter {
         "ExplainInterpreter"
     }
 
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    fn schema(&self) -> DataSchemaRef {
+        self.explain.schema()
+    }
+
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         let schema = self.schema();
 
         let block = match self.explain.typ {
             ExplainType::Graph => self.explain_graph(),
             ExplainType::Syntax => self.explain_syntax(),
             ExplainType::Pipeline => self.explain_pipeline(),
+            ExplainType::Fragments => self.explain_fragments(),
         }?;
 
         Ok(Box::pin(DataBlockStream::create(schema, None, vec![block])))
     }
-
-    fn schema(&self) -> DataSchemaRef {
-        self.explain.schema()
-    }
 }
 
 impl ExplainInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, explain: ExplainPlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(ExplainInterpreter { ctx, explain }))
+    pub fn try_create(ctx: Arc<QueryContext>, explain: ExplainPlan) -> Result<Self> {
+        Ok(ExplainInterpreter { ctx, explain })
     }
 
     fn explain_graph(&self) -> Result<DataBlock> {
@@ -101,14 +101,39 @@ impl ExplainInterpreter {
         let optimizer = Optimizers::without_scatters(self.ctx.clone());
         let plan = plan_schedulers::apply_plan_rewrite(optimizer, &self.explain.input)?;
 
-        let pipeline_builder = PipelineBuilder::create(self.ctx.clone());
-        let pipeline = pipeline_builder.build(&plan)?;
+        let pipeline_builder = QueryPipelineBuilder::create(self.ctx.clone());
+        let build_res = pipeline_builder.finalize(&plan)?;
+
         let formatted_pipeline = Series::from_data(
-            format!("{:?}", pipeline)
+            format!("{}", build_res.main_pipeline.display_indent())
                 .lines()
                 .map(|s| s.as_bytes())
                 .collect::<Vec<_>>(),
         );
         Ok(DataBlock::create(schema, vec![formatted_pipeline]))
+    }
+
+    fn explain_fragments(&self) -> Result<DataBlock> {
+        let ctx = self.ctx.clone();
+        let plan = plan_schedulers::apply_plan_rewrite(
+            Optimizers::create(ctx.clone()),
+            &self.explain.input,
+        )?;
+
+        let query_fragments = QueryFragmentsBuilder::build(ctx.clone(), &plan)?;
+        let root_query_fragment = RootQueryFragment::create(query_fragments, ctx.clone(), &plan)?;
+
+        let mut fragments_actions = QueryFragmentsActions::create(ctx);
+        root_query_fragment.finalize(&mut fragments_actions)?;
+
+        let formatted_fragments = Series::from_data(
+            fragments_actions
+                .display_indent()
+                .to_string()
+                .lines()
+                .map(|s| s.as_bytes())
+                .collect::<Vec<_>>(),
+        );
+        Ok(DataBlock::create(self.schema(), vec![formatted_fragments]))
     }
 }

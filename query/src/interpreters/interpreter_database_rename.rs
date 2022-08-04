@@ -15,15 +15,15 @@
 use std::sync::Arc;
 
 use common_exception::Result;
-use common_meta_types::DatabaseNameIdent;
-use common_meta_types::RenameDatabaseReq;
+use common_meta_app::schema::DatabaseNameIdent;
+use common_meta_app::schema::RenameDatabaseReq;
 use common_planners::RenameDatabasePlan;
 use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
 
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 
 pub struct RenameDatabaseInterpreter {
     ctx: Arc<QueryContext>,
@@ -31,8 +31,8 @@ pub struct RenameDatabaseInterpreter {
 }
 
 impl RenameDatabaseInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, plan: RenameDatabasePlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(RenameDatabaseInterpreter { ctx, plan }))
+    pub fn try_create(ctx: Arc<QueryContext>, plan: RenameDatabasePlan) -> Result<Self> {
+        Ok(RenameDatabaseInterpreter { ctx, plan })
     }
 }
 
@@ -42,21 +42,18 @@ impl Interpreter for RenameDatabaseInterpreter {
         "RenameDatabaseInterpreter"
     }
 
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         for entity in &self.plan.entities {
-            let catalog = self.ctx.get_catalog(&entity.catalog_name)?;
+            let catalog = self.ctx.get_catalog(&entity.catalog)?;
             let tenant = self.plan.tenant.clone();
             catalog
                 .rename_database(RenameDatabaseReq {
                     if_exists: entity.if_exists,
                     name_ident: DatabaseNameIdent {
                         tenant,
-                        db_name: entity.db.clone(),
+                        db_name: entity.database.clone(),
                     },
-                    new_db_name: entity.new_db.clone(),
+                    new_db_name: entity.new_database.clone(),
                 })
                 .await?;
         }

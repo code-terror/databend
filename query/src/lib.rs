@@ -17,13 +17,20 @@
 #![feature(arbitrary_self_types)]
 #![feature(generic_associated_types)]
 #![feature(type_alias_impl_trait)]
+#![feature(assert_matches)]
+#![feature(trusted_len)]
+#![feature(box_patterns)]
+#![feature(sync_unsafe_cell)]
+#![feature(option_get_or_insert_default)]
+#![feature(result_option_inspect)]
 
 pub mod api;
+pub mod auth;
 pub mod catalogs;
 pub mod clusters;
-pub mod common;
+pub mod context_function;
 pub mod databases;
-pub mod formats;
+pub mod evaluator;
 pub mod interpreters;
 pub mod metrics;
 pub mod optimizers;
@@ -34,10 +41,10 @@ pub mod sessions;
 pub mod sql;
 pub mod storages;
 pub mod table_functions;
-pub mod users;
 
 mod config;
 mod version;
 
 pub use config::Config;
 pub use version::DATABEND_COMMIT_VERSION;
+pub use version::QUERY_SEMVER;

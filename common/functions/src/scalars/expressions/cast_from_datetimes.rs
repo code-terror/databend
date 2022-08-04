@@ -30,7 +30,7 @@ const DATE_FMT: &str = "%Y-%m-%d";
 
 pub fn cast_from_date(
     column: &ColumnRef,
-    from_type: &DataTypeImpl,
+    _from_type: &DataTypeImpl,
     data_type: &DataTypeImpl,
     cast_options: &CastOptions,
     func_ctx: &FunctionContext,
@@ -57,7 +57,13 @@ pub fn cast_from_date(
             Ok((result, None))
         }
 
-        _ => arrow_cast_compute(column, from_type, data_type, cast_options, func_ctx),
+        _ => arrow_cast_compute(
+            column,
+            &i32::to_data_type(),
+            data_type,
+            cast_options,
+            func_ctx,
+        ),
     }
 }
 
@@ -72,7 +78,7 @@ pub fn cast_from_timestamp(
     let c: &Int64Column = Series::check_get(&c)?;
     let size = c.len();
 
-    let date_time64 = from_type.as_any().downcast_ref::<TimestampType>().unwrap();
+    let date_time64: TimestampType = from_type.to_owned().try_into()?;
 
     match data_type.data_type_id() {
         TypeID::String => {
@@ -102,7 +108,13 @@ pub fn cast_from_timestamp(
             Ok((result, None))
         }
 
-        _ => arrow_cast_compute(column, from_type, data_type, cast_options, func_ctx),
+        _ => arrow_cast_compute(
+            column,
+            &i64::to_data_type(),
+            data_type,
+            cast_options,
+            func_ctx,
+        ),
     }
 }
 

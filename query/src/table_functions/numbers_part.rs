@@ -11,7 +11,6 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-//
 
 use std::any::Any;
 use std::sync::Arc;
@@ -21,7 +20,7 @@ use common_exception::Result;
 use common_planners::PartInfo;
 use common_planners::PartInfoPtr;
 
-#[derive(serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct NumbersPartInfo {
     pub total: u64,
     pub part_start: u64,

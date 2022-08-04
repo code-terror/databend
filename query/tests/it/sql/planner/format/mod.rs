@@ -14,26 +14,27 @@
 
 use std::sync::Arc;
 
-use common_base::infallible::RwLock;
 use common_datavalues::BooleanType;
 use common_datavalues::DataSchemaRefExt;
 use common_datavalues::DataValue;
-use common_meta_types::TableIdent;
-use common_meta_types::TableInfo;
-use common_meta_types::TableMeta;
+use common_meta_app::schema::TableIdent;
+use common_meta_app::schema::TableInfo;
+use common_meta_app::schema::TableMeta;
 use common_planners::ReadDataSourcePlan;
 use common_planners::SourceInfo;
 use common_planners::Statistics;
 use databend_query::sql::optimizer::SExpr;
+use databend_query::sql::planner::plans::JoinType;
 use databend_query::sql::plans::BoundColumnRef;
 use databend_query::sql::plans::ConstantExpr;
-use databend_query::sql::plans::FilterPlan;
+use databend_query::sql::plans::Filter;
 use databend_query::sql::plans::FunctionCall;
 use databend_query::sql::plans::PhysicalHashJoin;
 use databend_query::sql::plans::PhysicalScan;
 use databend_query::sql::ColumnBinding;
 use databend_query::sql::Metadata;
 use databend_query::storages::Table;
+use parking_lot::RwLock;
 
 struct DummyTable {
     table_info: TableInfo,
@@ -106,48 +107,60 @@ fn test_format() {
 
     let s_expr = SExpr::create_binary(
         PhysicalHashJoin {
-            build_keys: vec![FunctionCall {
-                func_name: "plus".to_string(),
-                arg_types: vec![],
-                arguments: vec![
-                    BoundColumnRef {
-                        column: ColumnBinding {
-                            table_name: None,
-                            column_name: "col1".to_string(),
-                            index: col1,
-                            data_type: BooleanType::new_impl(),
-                            visible_in_unqualified_wildcard: false,
-                        },
-                    }
-                    .into(),
-                    ConstantExpr {
-                        value: DataValue::UInt64(123),
-                        data_type: BooleanType::new_impl(),
-                    }
-                    .into(),
-                ],
-                return_type: BooleanType::new_impl(),
-            }
-            .into()],
-            probe_keys: vec![BoundColumnRef {
-                column: ColumnBinding {
-                    table_name: None,
-                    column_name: "col2".to_string(),
-                    index: col2,
-                    data_type: BooleanType::new_impl(),
-                    visible_in_unqualified_wildcard: false,
-                },
-            }
-            .into()],
+            build_keys: vec![
+                FunctionCall {
+                    func_name: "plus".to_string(),
+                    arg_types: vec![],
+                    arguments: vec![
+                        BoundColumnRef {
+                            column: ColumnBinding {
+                                database_name: None,
+                                table_name: None,
+                                column_name: "col1".to_string(),
+                                index: col1,
+                                data_type: Box::new(BooleanType::new_impl()),
+                                visible_in_unqualified_wildcard: false,
+                            },
+                        }
+                        .into(),
+                        ConstantExpr {
+                            value: DataValue::UInt64(123),
+                            data_type: Box::new(BooleanType::new_impl()),
+                        }
+                        .into(),
+                    ],
+                    return_type: Box::new(BooleanType::new_impl()),
+                }
+                .into(),
+            ],
+            probe_keys: vec![
+                BoundColumnRef {
+                    column: ColumnBinding {
+                        database_name: None,
+                        table_name: None,
+                        column_name: "col2".to_string(),
+                        index: col2,
+                        data_type: Box::new(BooleanType::new_impl()),
+                        visible_in_unqualified_wildcard: false,
+                    },
+                }
+                .into(),
+            ],
+            other_conditions: vec![],
+            join_type: JoinType::Inner,
+            marker_index: None,
+            from_correlated_subquery: false,
         }
         .into(),
         SExpr::create_unary(
-            FilterPlan {
-                predicates: vec![ConstantExpr {
-                    value: DataValue::Boolean(true),
-                    data_type: BooleanType::new_impl(),
-                }
-                .into()],
+            Filter {
+                predicates: vec![
+                    ConstantExpr {
+                        value: DataValue::Boolean(true),
+                        data_type: Box::new(BooleanType::new_impl()),
+                    }
+                    .into(),
+                ],
                 is_having: false,
             }
             .into(),
@@ -155,6 +168,7 @@ fn test_format() {
                 PhysicalScan {
                     table_index: tab1,
                     columns: Default::default(),
+                    push_down_predicates: None,
                 }
                 .into(),
             ),
@@ -163,6 +177,7 @@ fn test_format() {
             PhysicalScan {
                 table_index: tab1,
                 columns: Default::default(),
+                push_down_predicates: None,
             }
             .into(),
         ),
@@ -172,10 +187,17 @@ fn test_format() {
 
     let tree = s_expr.to_format_tree(&metadata_ref);
     let result = tree.format_indent().unwrap();
-    let expect = r#"PhysicalHashJoin: build keys: [plus(col1, 123)], probe keys: [col2]
+    let expect = r#"HashJoin: INNER, build keys: [plus(col1 (#0), 123)], probe keys: [col2 (#1)], join filters: []
     Filter: [true]
-        PhysicalScan: catalog.database.table
-    PhysicalScan: catalog.database.table
+        Scan: catalog.database.table
+    Scan: catalog.database.table
 "#;
     assert_eq!(result.as_str(), expect);
+    let pretty_result = tree.format_pretty().unwrap();
+    let pretty_expect = r#"HashJoin: INNER, build keys: [plus(col1 (#0), 123)], probe keys: [col2 (#1)], join filters: []
+├── Filter: [true]
+│   └── Scan: catalog.database.table
+└── Scan: catalog.database.table
+"#;
+    assert_eq!(pretty_result.as_str(), pretty_expect);
 }

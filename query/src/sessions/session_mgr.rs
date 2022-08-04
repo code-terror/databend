@@ -23,21 +23,27 @@ use std::time::Duration;
 use common_base::base::tokio;
 use common_base::base::Runtime;
 use common_base::base::SignalStream;
-use common_base::infallible::RwLock;
 use common_contexts::DalRuntime;
 use common_exception::ErrorCode;
 use common_exception::Result;
-use common_io::prelude::init_operator;
 use common_metrics::label_counter;
-use common_tracing::init_query_logger;
-use common_tracing::tracing;
-use common_tracing::tracing_appender::non_blocking::WorkerGuard;
+use common_storage::init_operator;
+use common_tracing::init_logging;
+use common_users::RoleCacheMgr;
+use common_users::UserApiProvider;
 use futures::future::Either;
 use futures::StreamExt;
 use opendal::Operator;
+use parking_lot::RwLock;
+use tracing::debug;
+use tracing::info;
+use tracing_appender::non_blocking::WorkerGuard;
 
+use crate::api::DataExchangeManager;
 use crate::catalogs::CatalogManager;
+use crate::catalogs::CatalogManagerHelper;
 use crate::clusters::ClusterDiscovery;
+use crate::interpreters::AsyncInsertQueue;
 use crate::servers::http::v1::HttpQueryManager;
 use crate::sessions::session::Session;
 use crate::sessions::session_ref::SessionRef;
@@ -45,34 +51,45 @@ use crate::sessions::ProcessInfo;
 use crate::sessions::SessionManagerStatus;
 use crate::sessions::SessionType;
 use crate::storages::cache::CacheManager;
-use crate::users::UserApiProvider;
 use crate::Config;
 
 pub struct SessionManager {
-    pub(in crate::sessions) conf: RwLock<Config>,
-    pub(in crate::sessions) discovery: RwLock<Arc<ClusterDiscovery>>,
-    pub(in crate::sessions) catalogs: RwLock<Arc<CatalogManager>>,
+    pub(in crate::sessions) conf: Config,
+    pub(in crate::sessions) discovery: Arc<ClusterDiscovery>,
+    pub(in crate::sessions) catalogs: Arc<CatalogManager>,
     pub(in crate::sessions) http_query_manager: Arc<HttpQueryManager>,
+    pub(in crate::sessions) data_exchange_manager: Arc<DataExchangeManager>,
 
     pub(in crate::sessions) max_sessions: usize,
     pub(in crate::sessions) active_sessions: Arc<RwLock<HashMap<String, Arc<Session>>>>,
-    pub(in crate::sessions) storage_cache_manager: RwLock<Arc<CacheManager>>,
-    pub(in crate::sessions) query_logger:
-        RwLock<Option<Arc<dyn tracing::Subscriber + Send + Sync>>>,
+    pub(in crate::sessions) storage_cache_manager: Arc<CacheManager>,
     pub status: Arc<RwLock<SessionManagerStatus>>,
-    storage_operator: RwLock<Operator>,
+    storage_operator: Operator,
     storage_runtime: Arc<Runtime>,
-    _guards: Vec<WorkerGuard>,
 
-    user_api_provider: RwLock<Arc<UserApiProvider>>,
+    user_api_provider: Arc<UserApiProvider>,
+    role_cache_manager: Arc<RoleCacheMgr>,
     // When typ is MySQL, insert into this map, key is id, val is MySQL connection id.
     pub(crate) mysql_conn_map: Arc<RwLock<HashMap<Option<u32>, String>>>,
     pub(in crate::sessions) mysql_basic_conn_id: AtomicU32,
+    async_insert_queue: Arc<RwLock<Option<Arc<AsyncInsertQueue>>>>,
+
+    /// log_guard preserve the nonblocking logger's guards so that our logger
+    /// can flushes spans/events on a drop
+    ///
+    /// This field should never be used except in `drop`.
+    _log_guards: Vec<WorkerGuard>,
 }
 
 impl SessionManager {
     pub async fn from_conf(conf: Config) -> Result<Arc<SessionManager>> {
-        let catalogs = Arc::new(CatalogManager::new(&conf).await?);
+        let app_name = format!(
+            "databend-query-{}-{}",
+            conf.query.tenant_id, conf.query.cluster_id
+        );
+        let _log_guards = init_logging(app_name.as_str(), &conf.log);
+
+        let catalogs = Arc::new(CatalogManager::try_new(&conf).await?);
         let storage_cache_manager = Arc::new(CacheManager::init(&conf.query));
 
         // Cluster discovery.
@@ -81,7 +98,8 @@ impl SessionManager {
         let storage_runtime = {
             let mut storage_num_cpus = conf.storage.num_cpus as usize;
             if storage_num_cpus == 0 {
-                storage_num_cpus = std::cmp::max(1, num_cpus::get() / 2)
+                // We need at least two threads to schedule.
+                storage_num_cpus = std::cmp::max(2, num_cpus::get() / 2)
             }
 
             Runtime::with_worker_threads(storage_num_cpus, Some("IO-worker".to_owned()))?
@@ -98,39 +116,50 @@ impl SessionManager {
         let active_sessions = Arc::new(RwLock::new(HashMap::with_capacity(max_sessions)));
         let status = Arc::new(RwLock::new(Default::default()));
 
-        let (_guards, query_logger) = if conf.log.query_enabled {
-            let (_guards, query_logger) = init_query_logger("query-detail", conf.log.dir.as_str());
-            (_guards, Some(query_logger))
-        } else {
-            (Vec::new(), None)
-        };
         let mysql_conn_map = Arc::new(RwLock::new(HashMap::with_capacity(max_sessions)));
+        let user_api_provider =
+            UserApiProvider::create_global(conf.meta.to_meta_grpc_client_conf()).await?;
+        let role_cache_manager = Arc::new(RoleCacheMgr::new(user_api_provider.clone()));
+
+        let exchange_manager = DataExchangeManager::create(conf.clone());
+        let storage_runtime = Arc::new(storage_runtime);
+
+        let async_insert_queue =
+            Arc::new(RwLock::new(Some(Arc::new(AsyncInsertQueue::try_create(
+                Arc::new(RwLock::new(None)),
+                storage_runtime.clone(),
+                conf.clone().query.async_insert_max_data_size,
+                Duration::from_millis(conf.query.async_insert_busy_timeout),
+                Duration::from_millis(conf.query.async_insert_stale_timeout),
+            )))));
 
         Ok(Arc::new(SessionManager {
-            conf: RwLock::new(conf.clone()),
-            catalogs: RwLock::new(catalogs),
-            discovery: RwLock::new(discovery),
+            conf,
+            catalogs,
+            discovery,
             http_query_manager,
             max_sessions,
             active_sessions,
-            storage_cache_manager: RwLock::new(storage_cache_manager),
-            query_logger: RwLock::new(query_logger),
+            data_exchange_manager: exchange_manager,
+            storage_cache_manager,
             status,
-            storage_operator: RwLock::new(storage_operator),
-            storage_runtime: Arc::new(storage_runtime),
-            _guards,
-            user_api_provider: RwLock::new(UserApiProvider::create_global(conf).await?),
+            storage_operator,
+            storage_runtime,
+            user_api_provider,
+            role_cache_manager,
             mysql_conn_map,
             mysql_basic_conn_id: AtomicU32::new(9_u32.to_le() as u32),
+            async_insert_queue,
+            _log_guards,
         }))
     }
 
     pub fn get_conf(&self) -> Config {
-        self.conf.read().clone()
+        self.conf.clone()
     }
 
     pub fn get_cluster_discovery(self: &Arc<Self>) -> Arc<ClusterDiscovery> {
-        self.discovery.read().clone()
+        self.discovery.clone()
     }
 
     pub fn get_http_query_manager(self: &Arc<Self>) -> Arc<HttpQueryManager> {
@@ -138,15 +167,19 @@ impl SessionManager {
     }
 
     pub fn get_catalog_manager(self: &Arc<Self>) -> Arc<CatalogManager> {
-        self.catalogs.read().clone()
+        self.catalogs.clone()
     }
 
     pub fn get_storage_operator(self: &Arc<Self>) -> Operator {
-        self.storage_operator.read().clone()
+        self.storage_operator.clone()
     }
 
     pub fn get_storage_cache_manager(&self) -> Arc<CacheManager> {
-        self.storage_cache_manager.read().clone()
+        self.storage_cache_manager.clone()
+    }
+
+    pub fn get_data_exchange_manager(&self) -> Arc<DataExchangeManager> {
+        self.data_exchange_manager.clone()
     }
 
     pub fn get_storage_runtime(&self) -> Arc<Runtime> {
@@ -154,7 +187,11 @@ impl SessionManager {
     }
 
     pub fn get_user_api_provider(&self) -> Arc<UserApiProvider> {
-        self.user_api_provider.read().clone()
+        self.user_api_provider.clone()
+    }
+
+    pub fn get_role_cache_manager(&self) -> Arc<RoleCacheMgr> {
+        self.role_cache_manager.clone()
     }
 
     pub async fn create_session(self: &Arc<Self>, typ: SessionType) -> Result<SessionRef> {
@@ -184,7 +221,7 @@ impl SessionManager {
                 }
             }
             _ => {
-                tracing::debug!(
+                debug!(
                     "session type is {}, mysql_conn_map no need to change.",
                     session_typ
                 );
@@ -281,9 +318,13 @@ impl SessionManager {
             &config.query.cluster_id,
         );
 
-        let mut sessions = self.active_sessions.write();
-        sessions.remove(session_id);
-        //also need remove mysql_conn_map
+        // stop tracking session
+        {
+            let mut sessions = self.active_sessions.write();
+            sessions.remove(session_id);
+        }
+
+        // also need remove mysql_conn_map
         let mut mysql_conns_map = self.mysql_conn_map.write();
         for (k, v) in mysql_conns_map.deref_mut().clone() {
             if &v == session_id {
@@ -299,9 +340,10 @@ impl SessionManager {
     ) -> impl Future<Output = ()> {
         let active_sessions = self.active_sessions.clone();
         async move {
-            tracing::info!(
+            info!(
                 "Waiting {} secs for connections to close. You can press Ctrl + C again to force shutdown.",
-                timeout_secs);
+                timeout_secs
+            );
             let mut signal = Box::pin(signal.next());
 
             for _index in 0..timeout_secs {
@@ -317,7 +359,7 @@ impl SessionManager {
                 };
             }
 
-            tracing::info!("Will shutdown forcefully.");
+            info!("Will shutdown forcefully.");
             active_sessions
                 .read()
                 .values()
@@ -335,7 +377,7 @@ impl SessionManager {
 
     async fn destroy_idle_sessions(sessions: &Arc<RwLock<HashMap<String, Arc<Session>>>>) -> bool {
         // Read lock does not support reentrant
-        // https://github.com/Amanieu/parking_lot/blob/lock_api-0.4.4/lock_api/src/rwlock.rs#L422
+        // https://github.com/Amanieu/parking_lot::/blob/lock_api-0.4.4/lock_api/src/rwlock.rs#L422
         let active_sessions_read_guard = sessions.read();
 
         // First try to kill the idle session
@@ -345,7 +387,7 @@ impl SessionManager {
         match active_sessions {
             0 => true,
             _ => {
-                tracing::info!("Waiting for {} connections to close.", active_sessions);
+                info!("Waiting for {} connections to close.", active_sessions);
                 false
             }
         }
@@ -353,54 +395,21 @@ impl SessionManager {
 
     // Init the storage operator by config.
     async fn init_storage_operator(conf: &Config) -> Result<Operator> {
-        let op = init_operator(&conf.storage).await?;
-
+        let op = init_operator(&conf.storage.params).await?;
         // Enable exponential backoff by default
-        Ok(op.with_backoff(backon::ExponentialBackoff::default()))
+        let op = op.with_backoff(backon::ExponentialBackoff::default());
+        // OpenDAL will send a real request to underlying storage to check whether it works or not.
+        // If this check failed, it's highly possible that the users have configured it wrongly.
+        op.check().await.map_err(|e| {
+            ErrorCode::StorageUnavailable(format!(
+                "current configured storage is not available: {e}"
+            ))
+        })?;
+
+        Ok(op)
     }
 
-    pub async fn reload_config(&self) -> Result<()> {
-        // TODO(xp): Potential race condition if fields are updated one by one.
-        //           These fields should all be got prepared then update in one atomic update.
-
-        let config = {
-            let mut config = self.conf.write();
-            let config_file = config.config_file.clone();
-            *config = Config::load()?;
-            config.config_file = config_file;
-            config.clone()
-        };
-
-        {
-            let catalogs = CatalogManager::new(&config).await?;
-            *self.catalogs.write() = Arc::new(catalogs);
-        }
-
-        *self.storage_cache_manager.write() = Arc::new(CacheManager::init(&config.query));
-
-        {
-            // NOTE: Magic happens here. We will add a layer upon original storage operator
-            // so that all underlying storage operations will send to storage runtime.
-            let operator = Self::init_storage_operator(&config)
-                .await?
-                .layer(DalRuntime::new(self.storage_runtime.inner()));
-            *self.storage_operator.write() = operator;
-        }
-
-        {
-            let discovery = ClusterDiscovery::create_global(config.clone()).await?;
-            *self.discovery.write() = discovery;
-        }
-
-        {
-            let x = UserApiProvider::create_global(config).await?;
-            *self.user_api_provider.write() = x;
-        }
-
-        Ok(())
-    }
-
-    pub fn get_query_logger(&self) -> Option<Arc<dyn tracing::Subscriber + Send + Sync>> {
-        self.query_logger.write().to_owned()
+    pub fn get_async_insert_queue(&self) -> Arc<RwLock<Option<Arc<AsyncInsertQueue>>>> {
+        self.async_insert_queue.clone()
     }
 }

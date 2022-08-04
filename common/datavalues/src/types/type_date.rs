@@ -12,16 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use common_arrow::arrow::datatypes::DataType as ArrowType;
 use common_exception::ErrorCode;
 use common_exception::Result;
+use rand::prelude::*;
 
 use super::data_type::DataType;
 use super::type_id::TypeID;
 use crate::prelude::*;
+use crate::serializations::DateSerializer;
+use crate::serializations::TypeSerializerImpl;
 
 /// date ranges from 1000-01-01 to 9999-12-31
 /// date_max and date_min means days offset from 1970-01-01
@@ -31,7 +33,7 @@ pub const DATE_MIN: i32 = -354285;
 
 #[inline]
 pub fn check_date(days: i32) -> Result<()> {
-    if days >= DATE_MIN && days <= DATE_MAX {
+    if (DATE_MIN..=DATE_MAX).contains(&days) {
         return Ok(());
     }
     Err(ErrorCode::InvalidDate(
@@ -66,6 +68,12 @@ impl DataType for DateType {
         DataValue::Int64(0)
     }
 
+    fn random_value(&self) -> DataValue {
+        let mut rng = rand::rngs::SmallRng::from_entropy();
+        let date = rng.gen_range(DATE_MIN..=DATE_MAX) as i64;
+        DataValue::Int64(date)
+    }
+
     fn create_constant_column(&self, data: &DataValue, size: usize) -> Result<ColumnRef> {
         let value = data.as_i64()?;
         let column = Series::from_data(&[value as i32]);
@@ -83,17 +91,11 @@ impl DataType for DateType {
     }
 
     fn arrow_type(&self) -> ArrowType {
-        ArrowType::Int32
+        ArrowType::Date32
     }
 
-    fn custom_arrow_meta(&self) -> Option<BTreeMap<String, String>> {
-        let mut mp = BTreeMap::new();
-        mp.insert(ARROW_EXTENSION_NAME.to_string(), "Date".to_string());
-        Some(mp)
-    }
-
-    fn create_serializer(&self) -> TypeSerializerImpl {
-        DateSerializer::<i32>::default().into()
+    fn create_serializer_inner<'a>(&self, col: &'a ColumnRef) -> Result<TypeSerializerImpl<'a>> {
+        Ok(DateSerializer::<'a, i32>::try_create(col)?.into())
     }
 
     fn create_deserializer(&self, capacity: usize) -> TypeDeserializerImpl {

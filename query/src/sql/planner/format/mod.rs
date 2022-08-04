@@ -14,7 +14,9 @@
 
 mod display_rel_operator;
 use std::fmt::Display;
+mod display_plan;
 mod indent_format;
+mod pretty_format;
 
 pub struct FormatTreeNode<T: Display> {
     payload: T,

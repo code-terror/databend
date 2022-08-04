@@ -18,6 +18,7 @@ use common_arrow::arrow::array::*;
 use common_arrow::arrow::bitmap::Bitmap;
 use common_arrow::arrow::bitmap::MutableBitmap;
 use common_arrow::arrow::datatypes::DataType as ArrowType;
+use common_arrow::ArrayRef;
 
 use crate::prelude::*;
 
@@ -85,9 +86,9 @@ impl Column for BooleanColumn {
         self.values.as_slice().0.len()
     }
 
-    fn as_arrow_array(&self) -> ArrayRef {
-        let array = BooleanArray::from_data(ArrowType::Boolean, self.values.clone(), None);
-        Arc::new(array)
+    fn as_arrow_array(&self, logical_type: DataTypeImpl) -> ArrayRef {
+        let array = BooleanArray::from_data(logical_type.arrow_type(), self.values.clone(), None);
+        Box::new(array)
     }
 
     fn arc(&self) -> ColumnRef {
@@ -124,6 +125,10 @@ impl Column for BooleanColumn {
 
     fn get(&self, index: usize) -> DataValue {
         DataValue::Boolean(self.values.get_bit(index))
+    }
+
+    fn serialize(&self, vec: &mut Vec<u8>, row: usize) {
+        vec.push(self.values.get_bit(row) as u8);
     }
 }
 

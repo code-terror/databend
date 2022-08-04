@@ -14,31 +14,32 @@
 
 use common_exception::Result;
 
+use crate::sql::optimizer::Distribution;
 use crate::sql::optimizer::PhysicalProperty;
 use crate::sql::optimizer::RelExpr;
 use crate::sql::optimizer::RelationalProperty;
-use crate::sql::optimizer::SExpr;
-use crate::sql::plans::LogicalPlan;
+use crate::sql::optimizer::RequiredProperty;
+use crate::sql::plans::LogicalOperator;
 use crate::sql::plans::Operator;
-use crate::sql::plans::PhysicalPlan;
-use crate::sql::plans::PlanType;
+use crate::sql::plans::PhysicalOperator;
+use crate::sql::plans::RelOp;
 use crate::sql::IndexType;
 
 #[derive(Clone, Debug)]
-pub struct SortPlan {
+pub struct Sort {
     pub items: Vec<SortItem>,
 }
 
 #[derive(Clone, Debug)]
 pub struct SortItem {
     pub index: IndexType,
-    pub asc: Option<bool>,
-    pub nulls_first: Option<bool>,
+    pub asc: bool,
+    pub nulls_first: bool,
 }
 
-impl Operator for SortPlan {
-    fn plan_type(&self) -> PlanType {
-        PlanType::Sort
+impl Operator for Sort {
+    fn rel_op(&self) -> RelOp {
+        RelOp::Sort
     }
 
     fn is_physical(&self) -> bool {
@@ -49,22 +50,33 @@ impl Operator for SortPlan {
         true
     }
 
-    fn as_physical(&self) -> Option<&dyn PhysicalPlan> {
+    fn as_physical(&self) -> Option<&dyn PhysicalOperator> {
         Some(self)
     }
 
-    fn as_logical(&self) -> Option<&dyn LogicalPlan> {
+    fn as_logical(&self) -> Option<&dyn LogicalOperator> {
         Some(self)
     }
 }
 
-impl PhysicalPlan for SortPlan {
-    fn compute_physical_prop(&self, _expression: &SExpr) -> PhysicalProperty {
-        todo!()
+impl PhysicalOperator for Sort {
+    fn derive_physical_prop<'a>(&self, rel_expr: &RelExpr<'a>) -> Result<PhysicalProperty> {
+        rel_expr.derive_physical_prop_child(0)
+    }
+
+    fn compute_required_prop_child<'a>(
+        &self,
+        _rel_expr: &RelExpr<'a>,
+        _child_index: usize,
+        required: &RequiredProperty,
+    ) -> Result<RequiredProperty> {
+        let mut required = required.clone();
+        required.distribution = Distribution::Serial;
+        Ok(required)
     }
 }
 
-impl LogicalPlan for SortPlan {
+impl LogicalOperator for Sort {
     fn derive_relational_prop<'a>(&self, rel_expr: &RelExpr<'a>) -> Result<RelationalProperty> {
         rel_expr.derive_relational_prop_child(0)
     }

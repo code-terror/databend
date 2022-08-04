@@ -42,8 +42,7 @@ fn test_num_bits_hashes() -> Result<()> {
 
 #[tokio::test]
 async fn test_bloom_add_find_string() -> Result<()> {
-    let schema =
-        DataSchemaRefExt::create(vec![DataField::new_nullable("name", Vu8::to_data_type())]);
+    let schema = DataSchemaRefExt::create(vec![DataField::new("name", Vu8::to_data_type())]);
     let block = DataBlock::create(schema, vec![Series::from_data(vec![
         "Alice", "Bob", "Batman", "Superman", "123",
     ])]);
@@ -233,25 +232,23 @@ async fn create_bloom(
 // create test data, all numerics are odd number, even numbers are reserved for testing.
 fn create_blocks() -> Vec<DataBlock> {
     let schema = DataSchemaRefExt::create(vec![
-        DataField::new_nullable("ColumnUInt8", u8::to_data_type()),
-        DataField::new_nullable("ColumnUInt16", u16::to_data_type()),
-        DataField::new_nullable("ColumnUInt32", u32::to_data_type()),
-        DataField::new_nullable("ColumnUInt64", u64::to_data_type()),
-        DataField::new_nullable("ColumnInt8", i8::to_data_type()),
-        DataField::new_nullable("ColumnInt16", i16::to_data_type()),
-        DataField::new_nullable("ColumnInt32", i32::to_data_type()),
-        DataField::new_nullable("ColumnInt64", i64::to_data_type()),
-        DataField::new_nullable("ColumnFloat32", f32::to_data_type()),
-        DataField::new_nullable("ColumnFloat64", f64::to_data_type()),
-        DataField::new_nullable("ColumnDate16", DateType::new_impl()),
-        DataField::new_nullable("ColumnDate32", DateType::new_impl()),
-        DataField::new_nullable("ColumnDateTime32", TimestampType::new_impl(0)),
-        DataField::new_nullable("ColumnDateTime64", TimestampType::new_impl(3)),
-        DataField::new_nullable(
+        DataField::new("ColumnUInt8", u8::to_data_type()),
+        DataField::new("ColumnUInt16", u16::to_data_type()),
+        DataField::new("ColumnUInt32", u32::to_data_type()),
+        DataField::new("ColumnUInt64", u64::to_data_type()),
+        DataField::new("ColumnInt8", i8::to_data_type()),
+        DataField::new("ColumnInt16", i16::to_data_type()),
+        DataField::new("ColumnInt32", i32::to_data_type()),
+        DataField::new("ColumnInt64", i64::to_data_type()),
+        DataField::new("ColumnFloat32", f32::to_data_type()),
+        DataField::new("ColumnFloat64", f64::to_data_type()),
+        DataField::new("ColumnDate32", DateType::new_impl()),
+        DataField::new("ColumnDateTime64", TimestampType::new_impl(3)),
+        DataField::new(
             "ColumnIntervalDays",
             IntervalType::new_impl(IntervalKind::Day),
         ),
-        DataField::new_nullable("ColumnString", Vu8::to_data_type()),
+        DataField::new("ColumnString", Vu8::to_data_type()),
     ]);
 
     let block1 = DataBlock::create(schema.clone(), vec![
@@ -265,9 +262,7 @@ fn create_blocks() -> Vec<DataBlock> {
         Series::from_data(vec![-1_i64, -3, -5, -7]),
         Series::from_data(vec![1.0_f32, 3.0, 5.0, 7.0]),
         Series::from_data(vec![1.0_f64, 3.0, 5.0, 7.0]),
-        Series::from_data(vec![1_u16, 3, 5, 7]),
-        Series::from_data(vec![1_u32, 3, 5, 7]),
-        Series::from_data(vec![1_u32, 3, 5, 7]),
+        Series::from_data(vec![1_i32, 3, 5, 7]),
         Series::from_data(vec![1_i64, 3, 5, 7]),
         Series::from_data(vec![1_i64, 3, 5, 7]),
         Series::from_data(vec!["Alice", "Bob", "Batman", "Superman"]),
@@ -284,9 +279,7 @@ fn create_blocks() -> Vec<DataBlock> {
         Series::from_data(vec![-9_i64, -11, -13, -15]),
         Series::from_data(vec![9.0_f32, 11.0, 13.0, 15.0]),
         Series::from_data(vec![9.0_f64, 11.0, 13.0, 15.0]),
-        Series::from_data(vec![9_u16, 11, 13, 15]),
-        Series::from_data(vec![9_u32, 11, 13, 15]),
-        Series::from_data(vec![9_u32, 11, 13, 15]),
+        Series::from_data(vec![9_i32, 11, 13, 15]),
         Series::from_data(vec![9_i64, 11, 13, 15]),
         Series::from_data(vec![9_i64, 11, 13, 15]),
         Series::from_data(vec!["Iron man", "Thor", "Professor X", "Wolverine"]),
@@ -297,8 +290,9 @@ fn create_blocks() -> Vec<DataBlock> {
 
 async fn create_bloom_indexer() -> Result<BloomFilterIndexer> {
     let blocks = create_blocks();
+    let block_refs = blocks.iter().collect::<Vec<_>>();
     let ctx = create_query_context().await?;
-    BloomFilterIndexer::try_create_with_seed(blocks.as_slice(), create_seed(), ctx)
+    BloomFilterIndexer::try_create_with_seed(&block_refs, create_seed(), ctx)
 }
 
 #[tokio::test]
@@ -346,9 +340,9 @@ async fn test_bloom_hash_collision() -> Result<()> {
         assert!(!bloom.contains(&single_value_bloom), "{}", num);
     }
 
-    // When hash collision happens, although number 34 doesn't exist in data_blocks, the hash bits say yes.
+    // When hash collision happens, although number 32 doesn't exist in data_blocks, the hash bits say yes.
     let single_value_bloom =
-        create_bloom(u8::to_data_type(), Series::from_data(vec![34_u8]), &bloom).await?;
+        create_bloom(u8::to_data_type(), Series::from_data(vec![32_u8]), &bloom).await?;
     assert!(bloom.contains(&single_value_bloom));
     Ok(())
 }
@@ -363,8 +357,8 @@ async fn test_bloom_indexer_single_column_prune() -> Result<()> {
 
     let tests: Vec<Test> = vec![
         Test {
-            name: "ColumnUInt8 = 32",
-            expr: col("ColumnUInt8").eq(lit(32u8)),
+            name: "ColumnUInt8 = 31",
+            expr: col("ColumnUInt8").eq(lit(31u8)),
             expected_eval_result: BloomFilterExprEvalResult::False,
         },
         Test {

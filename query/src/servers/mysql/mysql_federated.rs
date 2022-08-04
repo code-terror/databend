@@ -17,10 +17,10 @@ use std::collections::HashMap;
 use common_datablocks::DataBlock;
 use common_datavalues::prelude::*;
 use common_datavalues::DataSchemaRefExt;
-use regex::RegexSet;
 
+use crate::servers::federated_helper::FederatedHelper;
+use crate::servers::federated_helper::LazyBlockFunc;
 use crate::servers::mysql::MYSQL_VERSION;
-type LazyBlockFunc = fn(&str) -> Option<DataBlock>;
 
 pub struct MySQLFederated {
     mysql_version: String,
@@ -39,12 +39,24 @@ impl MySQLFederated {
     // Format:
     // |@@variable|
     // |value|
+    #[allow(dead_code)]
     fn select_variable_block(name: &str, value: &str) -> Option<DataBlock> {
         Some(DataBlock::create(
             DataSchemaRefExt::create(vec![DataField::new(
                 &format!("@@{}", name),
                 StringType::new_impl(),
             )]),
+            vec![Series::from_data(vec![value])],
+        ))
+    }
+
+    // Build block for select function.
+    // Format:
+    // |function_name|
+    // |value|
+    fn select_function_block(name: &str, value: &str) -> Option<DataBlock> {
+        Some(DataBlock::create(
+            DataSchemaRefExt::create(vec![DataField::new(name, StringType::new_impl())]),
             vec![Series::from_data(vec![value])],
         ))
     }
@@ -64,45 +76,6 @@ impl MySQLFederated {
                 Series::from_data(vec![value]),
             ],
         ))
-    }
-
-    fn block_match_rule(
-        &self,
-        query: &str,
-        rules: Vec<(&str, Option<DataBlock>)>,
-    ) -> Option<DataBlock> {
-        let regex_rules = rules.iter().map(|x| x.0).collect::<Vec<_>>();
-        let regex_set = RegexSet::new(&regex_rules).unwrap();
-        let matches = regex_set.matches(query);
-        for (index, (_regex, data_block)) in rules.iter().enumerate() {
-            if matches.matched(index) {
-                return match data_block {
-                    None => Some(DataBlock::empty()),
-                    Some(data_block) => Some(data_block.clone()),
-                };
-            }
-        }
-
-        None
-    }
-
-    fn lazy_block_match_rule(
-        &self,
-        query: &str,
-        rules: Vec<(&str, LazyBlockFunc)>,
-    ) -> Option<DataBlock> {
-        let regex_rules = rules.iter().map(|x| x.0).collect::<Vec<_>>();
-        let regex_set = RegexSet::new(&regex_rules).unwrap();
-        let matches = regex_set.matches(query);
-        for (index, (_regex, func)) in rules.iter().enumerate() {
-            if matches.matched(index) {
-                return match func(query) {
-                    None => Some(DataBlock::empty()),
-                    Some(data_block) => Some(data_block),
-                };
-            }
-        }
-        None
     }
 
     // SELECT @@aa, @@bb as cc, @dd...
@@ -170,7 +143,7 @@ impl MySQLFederated {
                 Self::select_variable_data_block,
             ),
         ];
-        self.lazy_block_match_rule(query, rules)
+        FederatedHelper::lazy_block_match_rule(query, rules)
     }
 
     // Check SHOW VARIABLES LIKE.
@@ -179,18 +152,25 @@ impl MySQLFederated {
             // sqlalchemy < 1.4.30
             (
                 "(?i)^(SHOW VARIABLES LIKE 'sql_mode'(.*))",
-                Self::show_variables_block("sql_mode",
-                                           "ONLY_FULL_GROUP_BY STRICT_TRANS_TABLES NO_ZERO_IN_DATE NO_ZERO_DATE ERROR_FOR_DIVISION_BY_ZERO NO_ENGINE_SUBSTITUTION"),
+                Self::show_variables_block(
+                    "sql_mode",
+                    "ONLY_FULL_GROUP_BY STRICT_TRANS_TABLES NO_ZERO_IN_DATE NO_ZERO_DATE ERROR_FOR_DIVISION_BY_ZERO NO_ENGINE_SUBSTITUTION",
+                ),
             ),
             (
                 "(?i)^(SHOW VARIABLES LIKE 'lower_case_table_names'(.*))",
-                Self::show_variables_block("lower_case_table_names",
-                                           "0"),
+                Self::show_variables_block("lower_case_table_names", "0"),
             ),
-            ("(?i)^(show collation where(.*))", Self::show_variables_block("", "")),
-            ("(?i)^(SHOW VARIABLES(.*))", Self::show_variables_block("", "")),
+            (
+                "(?i)^(show collation where(.*))",
+                Self::show_variables_block("", ""),
+            ),
+            (
+                "(?i)^(SHOW VARIABLES(.*))",
+                Self::show_variables_block("", ""),
+            ),
         ];
-        self.block_match_rule(query, rules)
+        FederatedHelper::block_match_rule(query, rules)
     }
 
     // Check for SET or others query, this is the final check of the federated query.
@@ -198,7 +178,7 @@ impl MySQLFederated {
         let rules: Vec<(&str, Option<DataBlock>)> = vec![
             (
                 "(?i)^(SELECT VERSION())",
-                Self::select_variable_block(
+                Self::select_function_block(
                     "version()",
                     format!("{}-{}", self.mysql_version, self.databend_version.clone()).as_str(),
                 ),
@@ -210,17 +190,31 @@ impl MySQLFederated {
             // Set.
             ("(?i)^(SET NAMES(.*))", None),
             ("(?i)^(SET character_set_results(.*))", None),
+            ("(?i)^(SET net_write_timeout(.*))", None),
             ("(?i)^(SET FOREIGN_KEY_CHECKS(.*))", None),
             ("(?i)^(SET AUTOCOMMIT(.*))", None),
             ("(?i)^(SET SQL_LOG_BIN(.*))", None),
             ("(?i)^(SET sql_mode(.*))", None),
+            ("(?i)^(SET SQL_SELECT_LIMIT(.*))", None),
             ("(?i)^(SET @@(.*))", None),
+            // Now databend not support charset and collation
+            // https://github.com/datafuselabs/databend/issues/5853
+            ("(?i)^(SHOW COLLATION)", None),
+            ("(?i)^(SHOW CHARSET)", None),
+            (
+                // SELECT TIMEDIFF(NOW(), UTC_TIMESTAMP());
+                "(?i)^(SELECT TIMEDIFF\\(NOW\\(\\), UTC_TIMESTAMP\\(\\)\\))",
+                Self::select_function_block("TIMEDIFF(NOW(), UTC_TIMESTAMP())", "00:00:00"),
+            ),
             // mysqldump.
             ("(?i)^(SET SESSION(.*))", None),
             ("(?i)^(SET SQL_QUOTE_SHOW_CREATE(.*))", None),
             ("(?i)^(LOCK TABLES(.*))", None),
             ("(?i)^(UNLOCK TABLES(.*))", None),
-            ("(?i)^(SELECT LOGFILE_GROUP_NAME, FILE_NAME, TOTAL_EXTENTS, INITIAL_SIZE, ENGINE, EXTRA FROM INFORMATION_SCHEMA.FILES(.*))", None),
+            (
+                "(?i)^(SELECT LOGFILE_GROUP_NAME, FILE_NAME, TOTAL_EXTENTS, INITIAL_SIZE, ENGINE, EXTRA FROM INFORMATION_SCHEMA.FILES(.*))",
+                None,
+            ),
             // mydumper.
             ("(?i)^(SHOW MASTER STATUS)", None),
             ("(?i)^(SHOW ALL SLAVES STATUS)", None),
@@ -242,10 +236,9 @@ impl MySQLFederated {
                 None,
             ),
             ("(?i)^(/\\* ApplicationName=(.*)SHOW VARIABLES(.*))", None),
-
         ];
 
-        self.block_match_rule(query, rules)
+        FederatedHelper::block_match_rule(query, rules)
     }
 
     // Check the query is a federated or driver setup command.

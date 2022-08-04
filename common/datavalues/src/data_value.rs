@@ -21,11 +21,11 @@ use std::sync::Arc;
 
 use common_exception::ErrorCode;
 use common_exception::Result;
-use common_macros::MallocSizeOf;
 use ordered_float::OrderedFloat;
 use serde_json::json;
 
 use crate::prelude::*;
+use crate::type_coercion::merge_types;
 
 /// A specific value of a data type.
 #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq)]
@@ -48,7 +48,7 @@ pub enum DataValue {
 
 impl Eq for DataValue {}
 
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, MallocSizeOf)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ValueType {
     Null,
     Boolean,
@@ -123,18 +123,21 @@ impl DataValue {
             }
             DataValue::Float64(_) => Float64Type::new_impl(),
             DataValue::String(_) => StringType::new_impl(),
-            DataValue::Array(x) => {
-                let inner_type = if x.is_empty() {
-                    UInt8Type::new_impl()
+            DataValue::Array(vals) => {
+                let inner_type = if vals.is_empty() {
+                    NullType::new_impl()
                 } else {
-                    x[0].data_type()
+                    vals.iter()
+                        .fold(Ok(vals[0].data_type()), |acc, v| {
+                            merge_types(&acc?, &v.data_type())
+                        })
+                        .unwrap()
                 };
-                DataTypeImpl::Array(ArrayType::create(inner_type))
+                ArrayType::new_impl(inner_type)
             }
-            DataValue::Struct(x) => {
-                let names = (0..x.len()).map(|i| i.to_string()).collect::<Vec<_>>();
-                let types = x.iter().map(|v| v.data_type()).collect::<Vec<_>>();
-                DataTypeImpl::Struct(StructType::create(names, types))
+            DataValue::Struct(vals) => {
+                let types = vals.iter().map(|v| v.data_type()).collect::<Vec<_>>();
+                StructType::new_impl(None, types)
             }
             DataValue::Variant(_) => VariantType::new_impl(),
         }
@@ -149,18 +152,21 @@ impl DataValue {
             DataValue::UInt64(_) => UInt64Type::new_impl(),
             DataValue::Float64(_) => Float64Type::new_impl(),
             DataValue::String(_) => StringType::new_impl(),
-            DataValue::Array(x) => {
-                let inner_type = if x.is_empty() {
-                    UInt8Type::new_impl()
+            DataValue::Array(vals) => {
+                let inner_type = if vals.is_empty() {
+                    NullType::new_impl()
                 } else {
-                    x[0].data_type()
+                    vals.iter()
+                        .fold(Ok(vals[0].max_data_type()), |acc, v| {
+                            merge_types(&acc?, &v.max_data_type())
+                        })
+                        .unwrap()
                 };
-                DataTypeImpl::Array(ArrayType::create(inner_type))
+                ArrayType::new_impl(inner_type)
             }
-            DataValue::Struct(x) => {
-                let names = (0..x.len()).map(|i| i.to_string()).collect::<Vec<_>>();
-                let types = x.iter().map(|v| v.data_type()).collect::<Vec<_>>();
-                DataTypeImpl::Struct(StructType::create(names, types))
+            DataValue::Struct(vals) => {
+                let types = vals.iter().map(|v| v.max_data_type()).collect::<Vec<_>>();
+                StructType::new_impl(None, types)
             }
             DataValue::Variant(_) => VariantType::new_impl(),
         }
@@ -262,6 +268,16 @@ impl DataValue {
         }
     }
 
+    pub fn as_struct(&self) -> Result<Vec<DataValue>> {
+        match self {
+            DataValue::Struct(vals) => Ok(vals.to_vec()),
+            other => Result::Err(ErrorCode::BadDataValueType(format!(
+                "Unexpected type:{:?} to get struct values",
+                other.value_type()
+            ))),
+        }
+    }
+
     pub fn as_const_column(&self, data_type: &DataTypeImpl, size: usize) -> Result<ColumnRef> {
         data_type.create_constant_column(self, size)
     }
@@ -327,11 +343,11 @@ impl Ord for DataValue {
         }
 
         if self.is_null() {
-            return Ordering::Less;
+            return Ordering::Greater;
         }
 
         if other.is_null() {
-            return Ordering::Greater;
+            return Ordering::Less;
         }
 
         if !self.is_numeric() || !other.is_numeric() {
@@ -491,8 +507,17 @@ impl fmt::Display for DataValue {
                         .join(", ")
                 )
             }
-            DataValue::Struct(v) => write!(f, "{:?}", v),
-            DataValue::Variant(v) => write!(f, "{:#}", v),
+            DataValue::Struct(v) => {
+                write!(
+                    f,
+                    "({})",
+                    v.iter()
+                        .map(|v| v.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+            DataValue::Variant(v) => write!(f, "{}", v),
         }
     }
 }
@@ -507,8 +532,8 @@ impl fmt::Debug for DataValue {
             DataValue::Float64(v) => write!(f, "{}", v),
             DataValue::String(_) => write!(f, "{}", self),
             DataValue::Array(_) => write!(f, "{}", self),
-            DataValue::Struct(v) => write!(f, "{:?}", v),
-            DataValue::Variant(v) => write!(f, "{:#?}", v),
+            DataValue::Struct(_) => write!(f, "{}", self),
+            DataValue::Variant(v) => write!(f, "{}", v),
         }
     }
 }

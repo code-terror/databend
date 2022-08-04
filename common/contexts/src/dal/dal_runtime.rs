@@ -21,15 +21,18 @@ use common_base::base::tokio::runtime::Handle;
 use opendal::ops::OpCreate;
 use opendal::ops::OpDelete;
 use opendal::ops::OpList;
+use opendal::ops::OpPresign;
 use opendal::ops::OpRead;
 use opendal::ops::OpStat;
 use opendal::ops::OpWrite;
+use opendal::ops::PresignedRequest;
 use opendal::Accessor;
+use opendal::AccessorMetadata;
 use opendal::BytesReader;
 use opendal::BytesWriter;
+use opendal::DirStreamer;
 use opendal::Layer;
-use opendal::Metadata;
-use opendal::ObjectStreamer;
+use opendal::ObjectMetadata;
 
 /// # TODO
 ///
@@ -75,6 +78,16 @@ impl Layer for DalRuntime {
 
 #[async_trait]
 impl Accessor for DalRuntime {
+    fn metadata(&self) -> AccessorMetadata {
+        self.get_inner()
+            .expect("must have valid accessor")
+            .metadata()
+    }
+
+    fn presign(&self, args: &OpPresign) -> Result<PresignedRequest> {
+        self.get_inner()?.presign(args)
+    }
+
     async fn create(&self, args: &OpCreate) -> Result<()> {
         let op = self.get_inner()?;
         let args = args.clone();
@@ -102,7 +115,7 @@ impl Accessor for DalRuntime {
             .expect("join must success")
     }
 
-    async fn stat(&self, args: &OpStat) -> Result<Metadata> {
+    async fn stat(&self, args: &OpStat) -> Result<ObjectMetadata> {
         let op = self.get_inner()?;
         let args = args.clone();
         self.runtime
@@ -120,7 +133,7 @@ impl Accessor for DalRuntime {
             .expect("join must success")
     }
 
-    async fn list(&self, args: &OpList) -> Result<ObjectStreamer> {
+    async fn list(&self, args: &OpList) -> Result<DirStreamer> {
         let op = self.get_inner()?;
         let args = args.clone();
         self.runtime

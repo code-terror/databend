@@ -11,17 +11,16 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-//
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use common_base::infallible::RwLock;
 use common_exception::ErrorCode;
 use common_exception::Result;
 use common_meta_types::MetaId;
+use parking_lot::RwLock;
 
 use crate::storages::Table;
 

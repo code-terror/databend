@@ -14,11 +14,9 @@
 
 use std::str::FromStr;
 
-use common_base::base::ProgressValues;
 use common_datavalues::DataSchemaRef;
 use common_exception::ErrorCode;
-use common_io::prelude::FormatSettings;
-use common_tracing::tracing;
+use common_formats::output_format::OutputFormatType;
 use poem::error::BadRequest;
 use poem::error::Error as PoemError;
 use poem::error::InternalServerError;
@@ -36,13 +34,17 @@ use poem::Route;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
+use tracing::error;
+use tracing::info;
 
 use super::query::ExecuteStateKind;
 use super::query::HttpQueryRequest;
 use super::query::HttpQueryResponseInternal;
-use crate::formats::output_format::OutputFormatType;
+use crate::servers::http::v1::query::Progresses;
 use crate::servers::http::v1::HttpQueryContext;
+use crate::servers::http::v1::HttpSessionConf;
 use crate::servers::http::v1::JsonBlock;
+use crate::sessions::QueryAffect;
 use crate::sessions::SessionType;
 use crate::storages::result::ResultTable;
 
@@ -79,7 +81,8 @@ impl QueryError {
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct QueryStats {
-    pub scan_progress: Option<ProgressValues>,
+    #[serde(flatten)]
+    pub progresses: Progresses,
     pub running_time_ms: f64,
 }
 
@@ -87,12 +90,14 @@ pub struct QueryStats {
 pub struct QueryResponse {
     pub id: String,
     pub session_id: Option<String>,
+    pub session: Option<HttpSessionConf>,
     pub schema: Option<DataSchemaRef>,
     pub data: Vec<Vec<JsonValue>>,
     pub state: ExecuteStateKind,
     // only sql query error
     pub error: Option<QueryError>,
     pub stats: QueryStats,
+    pub affect: Option<QueryAffect>,
     pub stats_uri: Option<String>,
     // just call it after client not use it anymore, not care about the server-side behavior
     pub final_uri: Option<String>,
@@ -112,7 +117,7 @@ impl QueryResponse {
         let schema = data.schema().clone();
         let session_id = r.session_id.clone();
         let stats = QueryStats {
-            scan_progress: state.scan_progress.clone(),
+            progresses: state.progresses.clone(),
             running_time_ms: state.running_time_ms,
         };
         QueryResponse {
@@ -120,7 +125,9 @@ impl QueryResponse {
             state: state.state,
             schema: Some(schema),
             session_id: Some(session_id),
+            session: r.session,
             stats,
+            affect: state.affect,
             id: id.clone(),
             next_uri: next_url,
             stats_uri: Some(make_state_uri(&id)),
@@ -135,9 +142,11 @@ impl QueryResponse {
             id: "".to_string(),
             stats: QueryStats::default(),
             state: ExecuteStateKind::Failed,
+            affect: None,
             data: vec![],
             schema: None,
             session_id: None,
+            session: None,
             next_uri: None,
             stats_uri: None,
             final_uri: None,
@@ -202,11 +211,9 @@ async fn query_page_handler(
     let http_query_manager = ctx.session_mgr.get_http_query_manager();
     match http_query_manager.get_query(&query_id).await {
         Some(query) => {
-            // TODO(veeupup): get query_ctx here to get format_settings
-            let format = FormatSettings::default();
             query.clear_expire_time().await;
             let resp = query
-                .get_response_page(page_no, &format)
+                .get_response_page(page_no)
                 .await
                 .map_err(|err| poem::Error::from_string(err.message(), StatusCode::NOT_FOUND))?;
             query.update_expire_time().await;
@@ -221,16 +228,14 @@ pub(crate) async fn query_handler(
     ctx: &HttpQueryContext,
     Json(req): Json<HttpQueryRequest>,
 ) -> PoemResult<Json<QueryResponse>> {
-    tracing::info!("receive http query: {:?}", req);
+    info!("receive http query: {:?}", req);
     let http_query_manager = ctx.session_mgr.get_http_query_manager();
     let query = http_query_manager.try_create_query(ctx, req).await;
 
-    // TODO(veeupup): get global query_ctx's format_settings, because we cann't set session settings now
-    let format = FormatSettings::default();
     match query {
         Ok(query) => {
             let resp = query
-                .get_response_page(0, &format)
+                .get_response_page(0)
                 .await
                 .map_err(|err| poem::Error::from_string(err.message(), StatusCode::NOT_FOUND))?;
             query.update_expire_time().await;
@@ -240,7 +245,7 @@ pub(crate) async fn query_handler(
             )))
         }
         Err(e) => {
-            tracing::error!("Fail to start sql, Error: {:?}", e);
+            error!("Fail to start sql, Error: {:?}", e);
             Ok(Json(QueryResponse::fail_to_start_sql(&e)))
         }
     }
@@ -273,6 +278,7 @@ fn query_id_not_found(query_id: String) -> PoemError {
 #[derive(Deserialize)]
 struct DownloadHandlerParams {
     pub format: Option<String>,
+    pub limit: Option<usize>,
 }
 
 #[poem::handler]
@@ -302,7 +308,7 @@ async fn result_download_handler(
         })?;
 
     let stream = result_table
-        .download(ctx, format)
+        .download(ctx, format, params.limit)
         .await
         .map_err(InternalServerError)?;
 

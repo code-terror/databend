@@ -16,9 +16,9 @@ mod mutable;
 
 use std::sync::Arc;
 
-use common_arrow::arrow::array::*;
 use common_arrow::arrow::bitmap::Bitmap;
 use common_arrow::arrow::bitmap::MutableBitmap;
+use common_arrow::ArrayRef;
 pub use mutable::*;
 
 use crate::prelude::*;
@@ -41,7 +41,16 @@ impl NullableColumn {
             let inner = c.inner().clone();
             // If the column is const, it means the `inner` column is just one size
             // So we just need the first bit of the validity
-            let validity = validity.map(|b| b.slice(0, 1));
+
+            let validity = if let Some(b) = validity {
+                if b.is_empty() {
+                    None
+                } else {
+                    Some(b.slice(0, 1))
+                }
+            } else {
+                None
+            };
             let nullable_column = Self::new_from_opt(inner, validity).arc();
             ConstColumn::new(nullable_column, c.len()).arc()
         }
@@ -107,7 +116,7 @@ impl Column for NullableColumn {
     }
 
     fn only_null(&self) -> bool {
-        self.validity.null_count() == self.validity.len()
+        self.validity.unset_bits() == self.validity.len()
     }
 
     fn validity(&self) -> (bool, Option<&Bitmap>) {
@@ -118,9 +127,9 @@ impl Column for NullableColumn {
         self.column.memory_size()
     }
 
-    fn as_arrow_array(&self) -> ArrayRef {
-        let result = self.column.as_arrow_array();
-        Arc::from(result.with_validity(Some(self.validity.clone())))
+    fn as_arrow_array(&self, logical_type: DataTypeImpl) -> ArrayRef {
+        let result = self.column.as_arrow_array(logical_type);
+        result.with_validity(Some(self.validity.clone()))
     }
 
     fn arc(&self) -> ColumnRef {
@@ -135,7 +144,7 @@ impl Column for NullableColumn {
     }
 
     fn filter(&self, filter: &BooleanColumn) -> ColumnRef {
-        if filter.values().null_count() == 0 {
+        if filter.values().unset_bits() == 0 {
             return Arc::new(self.clone());
         }
         let inner = self.inner().filter(filter);
@@ -211,6 +220,14 @@ impl Column for NullableColumn {
             self.column.get(index)
         } else {
             DataValue::Null
+        }
+    }
+
+    fn serialize(&self, vec: &mut Vec<u8>, row: usize) {
+        let valid = self.validity.get_bit(row);
+        vec.push(valid as u8);
+        if valid {
+            self.column.serialize(vec, row);
         }
     }
 }

@@ -61,11 +61,11 @@ pub trait ScalarVisitor: Sized {
                                     stack.push(RecursionProcessing::Call(&**left));
                                     stack.push(RecursionProcessing::Call(&**right));
                                 }
-                                Scalar::AndExpr(AndExpr { left, right }) => {
+                                Scalar::AndExpr(AndExpr { left, right, .. }) => {
                                     stack.push(RecursionProcessing::Call(&**left));
                                     stack.push(RecursionProcessing::Call(&**right));
                                 }
-                                Scalar::OrExpr(OrExpr { left, right }) => {
+                                Scalar::OrExpr(OrExpr { left, right, .. }) => {
                                     stack.push(RecursionProcessing::Call(&**left));
                                     stack.push(RecursionProcessing::Call(&**right));
                                 }
@@ -75,7 +75,7 @@ pub trait ScalarVisitor: Sized {
                                     }
                                 }
                                 Scalar::BoundColumnRef(_) | Scalar::ConstantExpr(_) => {}
-                                Scalar::Cast(CastExpr { argument, .. }) => {
+                                Scalar::CastExpr(CastExpr { argument, .. }) => {
                                     stack.push(RecursionProcessing::Call(argument))
                                 }
                                 Scalar::SubqueryExpr(_) => {}
@@ -126,7 +126,6 @@ impl Scalar {
     /// ```
     ///
     /// If an Err result is returned, recursion is stopped immediately
-    ///
     pub fn accept<V: ScalarVisitor>(&self, visitor: V) -> Result<V> {
         let visitor = match visitor.pre_visit(self)? {
             Recursion::Continue(visitor) => visitor,

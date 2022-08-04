@@ -17,9 +17,10 @@ use std::mem::size_of;
 use common_base::base::tokio;
 use common_datavalues::*;
 use common_exception::Result;
-use common_meta_types::TableInfo;
+use common_meta_app::schema::TableInfo;
 use common_planners::*;
 use databend_query::optimizers::*;
+use databend_query::sessions::TableContext;
 use pretty_assertions::assert_eq;
 
 use crate::optimizers::optimizer::*;

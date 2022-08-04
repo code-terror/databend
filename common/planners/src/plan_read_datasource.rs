@@ -18,7 +18,7 @@ use std::sync::Arc;
 use common_datavalues::DataField;
 use common_datavalues::DataSchema;
 use common_datavalues::DataSchemaRef;
-use common_meta_types::TableInfo;
+use common_meta_app::schema::TableInfo;
 
 use crate::Expression;
 use crate::Extras;
@@ -26,7 +26,7 @@ use crate::Partitions;
 use crate::StageTableInfo;
 use crate::Statistics;
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum SourceInfo {
     // Normal table source, `fuse/system`.
     TableSource(TableInfo),

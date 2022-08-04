@@ -40,6 +40,41 @@ impl ToString for ErrorCodeBacktrace {
     }
 }
 
+impl From<&str> for ErrorCodeBacktrace {
+    fn from(s: &str) -> Self {
+        Self::Serialized(Arc::new(s.to_string()))
+    }
+}
+impl From<String> for ErrorCodeBacktrace {
+    fn from(s: String) -> Self {
+        Self::Serialized(Arc::new(s))
+    }
+}
+
+impl From<Arc<String>> for ErrorCodeBacktrace {
+    fn from(s: Arc<String>) -> Self {
+        Self::Serialized(s)
+    }
+}
+
+impl From<Backtrace> for ErrorCodeBacktrace {
+    fn from(bt: Backtrace) -> Self {
+        Self::Origin(Arc::new(bt))
+    }
+}
+
+impl From<&Backtrace> for ErrorCodeBacktrace {
+    fn from(bt: &Backtrace) -> Self {
+        Self::Serialized(Arc::new(bt.to_string()))
+    }
+}
+
+impl From<Arc<Backtrace>> for ErrorCodeBacktrace {
+    fn from(bt: Arc<Backtrace>) -> Self {
+        Self::Origin(bt)
+    }
+}
+
 #[derive(Error)]
 pub struct ErrorCode {
     code: u16,
@@ -82,6 +117,16 @@ impl ErrorCode {
         }
     }
 
+    /// Set backtrace info for this error.
+    ///
+    /// Useful when trying to keep original backtrace
+    pub fn set_backtrace(mut self, bt: Option<impl Into<ErrorCodeBacktrace>>) -> Self {
+        if let Some(b) = bt {
+            self.backtrace = Some(b.into());
+        }
+        self
+    }
+
     pub fn backtrace(&self) -> Option<ErrorCodeBacktrace> {
         self.backtrace.clone()
     }
@@ -111,7 +156,10 @@ impl Debug for ErrorCode {
                 match backtrace {
                     ErrorCodeBacktrace::Origin(backtrace) => {
                         if backtrace.status() == BacktraceStatus::Disabled {
-                            write!(f, "\n\n<Backtrace disabled by default. Please use RUST_BACKTRACE=1 to enable> ")
+                            write!(
+                                f,
+                                "\n\n<Backtrace disabled by default. Please use RUST_BACKTRACE=1 to enable> "
+                            )
                         } else {
                             write!(f, "\n\n{}", backtrace)
                         }
@@ -162,12 +210,11 @@ impl ErrorCode {
 /// Provides the `map_err_to_code` method for `Result`.
 ///
 /// ```
-/// use common_exception::ToErrorCode;
 /// use common_exception::ErrorCode;
+/// use common_exception::ToErrorCode;
 ///
 /// let x: std::result::Result<(), std::fmt::Error> = Err(std::fmt::Error {});
-/// let y: common_exception::Result<()> =
-///     x.map_err_to_code(ErrorCode::UnknownException, || 123);
+/// let y: common_exception::Result<()> = x.map_err_to_code(ErrorCode::UnknownException, || 123);
 ///
 /// assert_eq!(
 ///     "Code: 1067, displayText = 123, cause: an error occurred when formatting an argument.",

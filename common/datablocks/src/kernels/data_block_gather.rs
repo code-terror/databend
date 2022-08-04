@@ -12,11 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use common_arrow::arrow::array::growable::make_growable;
 use common_arrow::arrow::array::Array;
-use common_arrow::arrow::array::ArrayRef;
+use common_arrow::ArrayRef;
 use common_datavalues::ColumnRef;
 use common_datavalues::IntoColumn;
 use common_exception::Result;
@@ -56,7 +54,7 @@ impl DataBlock {
     ) -> Result<ColumnRef> {
         let arrays = columns
             .iter()
-            .map(|c| c.as_arrow_array())
+            .map(|c| c.as_arrow_array(c.data_type()))
             .collect::<Vec<ArrayRef>>();
 
         let arrays: Vec<&dyn Array> = arrays.iter().map(|array| array.as_ref()).collect();
@@ -66,8 +64,7 @@ impl DataBlock {
             growable.extend(index.0, index.1, 1);
         }
 
-        let result = growable.as_box();
-        let result: ArrayRef = Arc::from(result);
+        let result: ArrayRef = growable.as_box();
 
         match nullable {
             false => Ok(result.into_column()),

@@ -16,62 +16,27 @@ use std::sync::Arc;
 
 use common_datavalues::DataSchemaRef;
 
-use crate::plan_table_undrop::UnDropTablePlan;
+use crate::plan_window_func::WindowFuncPlan;
 use crate::AggregatorFinalPlan;
 use crate::AggregatorPartialPlan;
-use crate::AlterUserPlan;
-use crate::AlterUserUDFPlan;
-use crate::AlterViewPlan;
 use crate::BroadcastPlan;
-use crate::CallPlan;
-use crate::CopyPlan;
-use crate::CreateDatabasePlan;
-use crate::CreateRolePlan;
-use crate::CreateTablePlan;
-use crate::CreateUserPlan;
-use crate::CreateUserStagePlan;
-use crate::CreateUserUDFPlan;
-use crate::CreateViewPlan;
-use crate::DescribeTablePlan;
-use crate::DescribeUserStagePlan;
-use crate::DropDatabasePlan;
-use crate::DropRolePlan;
-use crate::DropTablePlan;
-use crate::DropUserPlan;
-use crate::DropUserStagePlan;
-use crate::DropUserUDFPlan;
-use crate::DropViewPlan;
+use crate::DeletePlan;
 use crate::EmptyPlan;
 use crate::ExplainPlan;
 use crate::ExpressionPlan;
 use crate::FilterPlan;
-use crate::GrantPrivilegePlan;
-use crate::GrantRolePlan;
 use crate::HavingPlan;
 use crate::InsertPlan;
-use crate::KillPlan;
 use crate::LimitByPlan;
 use crate::LimitPlan;
-use crate::ListPlan;
-use crate::OptimizeTablePlan;
 use crate::ProjectionPlan;
 use crate::ReadDataSourcePlan;
 use crate::RemotePlan;
-use crate::RenameDatabasePlan;
-use crate::RenameTablePlan;
-use crate::RevokePrivilegePlan;
-use crate::RevokeRolePlan;
 use crate::SelectPlan;
-use crate::SettingPlan;
-use crate::ShowCreateDatabasePlan;
-use crate::ShowCreateTablePlan;
-use crate::ShowPlan;
 use crate::SinkPlan;
 use crate::SortPlan;
 use crate::StagePlan;
 use crate::SubQueriesSetPlan;
-use crate::TruncateTablePlan;
-use crate::UseDatabasePlan;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq)]
@@ -87,6 +52,7 @@ pub enum PlanNode {
     AggregatorFinal(AggregatorFinalPlan),
     Filter(FilterPlan),
     Having(HavingPlan),
+    WindowFunc(WindowFuncPlan),
     Sort(SortPlan),
     Limit(LimitPlan),
     LimitBy(LimitByPlan),
@@ -103,74 +69,8 @@ pub enum PlanNode {
     // Insert.
     Insert(InsertPlan),
 
-    // Copy.
-    Copy(CopyPlan),
-
-    // Call.
-    Call(CallPlan),
-
-    // List
-    List(ListPlan),
-
-    // Show.
-    Show(ShowPlan),
-
-    // Database.
-    CreateDatabase(CreateDatabasePlan),
-    DropDatabase(DropDatabasePlan),
-    RenameDatabase(RenameDatabasePlan),
-    ShowCreateDatabase(ShowCreateDatabasePlan),
-
-    // Table.
-    CreateTable(CreateTablePlan),
-    DropTable(DropTablePlan),
-    UnDropTable(UnDropTablePlan),
-    RenameTable(RenameTablePlan),
-    TruncateTable(TruncateTablePlan),
-    OptimizeTable(OptimizeTablePlan),
-    DescribeTable(DescribeTablePlan),
-    ShowCreateTable(ShowCreateTablePlan),
-
-    // View.
-    CreateView(CreateViewPlan),
-    DropView(DropViewPlan),
-    AlterView(AlterViewPlan),
-
-    // User.
-    CreateUser(CreateUserPlan),
-    AlterUser(AlterUserPlan),
-    DropUser(DropUserPlan),
-
-    // Grant.
-    GrantPrivilege(GrantPrivilegePlan),
-    GrantRole(GrantRolePlan),
-
-    // Revoke.
-    RevokePrivilege(RevokePrivilegePlan),
-    RevokeRole(RevokeRolePlan),
-
-    // Role.
-    CreateRole(CreateRolePlan),
-    DropRole(DropRolePlan),
-
-    // Stage.
-    CreateUserStage(CreateUserStagePlan),
-    DropUserStage(DropUserStagePlan),
-    DescribeUserStage(DescribeUserStagePlan),
-
-    // UDF.
-    CreateUserUDF(CreateUserUDFPlan),
-    DropUserUDF(DropUserUDFPlan),
-    AlterUserUDF(AlterUserUDFPlan),
-
-    // Use.
-    UseDatabase(UseDatabasePlan),
-
-    // Set.
-    SetVariable(SettingPlan),
-
-    // Kill.
-    Kill(KillPlan),
+    // Delete.
+    Delete(DeletePlan),
 }
 
 impl PlanNode {
@@ -188,6 +88,7 @@ impl PlanNode {
             PlanNode::AggregatorFinal(v) => v.schema(),
             PlanNode::Filter(v) => v.schema(),
             PlanNode::Having(v) => v.schema(),
+            PlanNode::WindowFunc(v) => v.schema(),
             PlanNode::Limit(v) => v.schema(),
             PlanNode::LimitBy(v) => v.schema(),
             PlanNode::ReadSource(v) => v.schema(),
@@ -204,74 +105,8 @@ impl PlanNode {
             // Insert.
             PlanNode::Insert(v) => v.schema(),
 
-            // Copy.
-            PlanNode::Copy(v) => v.schema(),
-
-            // Call.
-            PlanNode::Call(v) => v.schema(),
-
-            // Show.
-            PlanNode::Show(v) => v.schema(),
-
-            // Database.
-            PlanNode::CreateDatabase(v) => v.schema(),
-            PlanNode::DropDatabase(v) => v.schema(),
-            PlanNode::ShowCreateDatabase(v) => v.schema(),
-            PlanNode::RenameDatabase(v) => v.schema(),
-
-            // Table.
-            PlanNode::CreateTable(v) => v.schema(),
-            PlanNode::DropTable(v) => v.schema(),
-            PlanNode::UnDropTable(v) => v.schema(),
-            PlanNode::RenameTable(v) => v.schema(),
-            PlanNode::TruncateTable(v) => v.schema(),
-            PlanNode::OptimizeTable(v) => v.schema(),
-            PlanNode::DescribeTable(v) => v.schema(),
-            PlanNode::ShowCreateTable(v) => v.schema(),
-
-            // View.
-            PlanNode::CreateView(v) => v.schema(),
-            PlanNode::AlterView(v) => v.schema(),
-            PlanNode::DropView(v) => v.schema(),
-
-            // User.
-            PlanNode::CreateUser(v) => v.schema(),
-            PlanNode::AlterUser(v) => v.schema(),
-            PlanNode::DropUser(v) => v.schema(),
-
-            // Grant.
-            PlanNode::GrantPrivilege(v) => v.schema(),
-            PlanNode::GrantRole(v) => v.schema(),
-
-            // Revoke.
-            PlanNode::RevokePrivilege(v) => v.schema(),
-            PlanNode::RevokeRole(v) => v.schema(),
-
-            // Role.
-            PlanNode::CreateRole(v) => v.schema(),
-            PlanNode::DropRole(v) => v.schema(),
-
-            // Stage.
-            PlanNode::CreateUserStage(v) => v.schema(),
-            PlanNode::DropUserStage(v) => v.schema(),
-            PlanNode::DescribeUserStage(v) => v.schema(),
-
-            // List
-            PlanNode::List(v) => v.schema(),
-
-            // UDF.
-            PlanNode::CreateUserUDF(v) => v.schema(),
-            PlanNode::DropUserUDF(v) => v.schema(),
-            PlanNode::AlterUserUDF(v) => v.schema(),
-
-            // Use.
-            PlanNode::UseDatabase(v) => v.schema(),
-
-            // Set.
-            PlanNode::SetVariable(v) => v.schema(),
-
-            // Kill.
-            PlanNode::Kill(v) => v.schema(),
+            // Delete.
+            PlanNode::Delete(v) => v.schema(),
         }
     }
 
@@ -288,6 +123,7 @@ impl PlanNode {
             PlanNode::AggregatorFinal(_) => "AggregatorFinalPlan",
             PlanNode::Filter(_) => "FilterPlan",
             PlanNode::Having(_) => "HavingPlan",
+            PlanNode::WindowFunc(_) => "WindowFuncPlan",
             PlanNode::Limit(_) => "LimitPlan",
             PlanNode::LimitBy(_) => "LimitByPlan",
             PlanNode::ReadSource(_) => "ReadSourcePlan",
@@ -304,74 +140,8 @@ impl PlanNode {
             // Insert.
             PlanNode::Insert(_) => "InsertPlan",
 
-            // Copy.
-            PlanNode::Copy(_) => "CopyPlan",
-
-            // Call.
-            PlanNode::Call(_) => "CallPlan",
-
-            // Show.
-            PlanNode::Show(_) => "ShowPlan",
-
-            // Database.
-            PlanNode::CreateDatabase(_) => "CreateDatabasePlan",
-            PlanNode::DropDatabase(_) => "DropDatabasePlan",
-            PlanNode::ShowCreateDatabase(_) => "ShowCreateDatabasePlan",
-            PlanNode::RenameDatabase(_) => "RenameDatabase",
-
-            // Table.
-            PlanNode::CreateTable(_) => "CreateTablePlan",
-            PlanNode::DropTable(_) => "DropTablePlan",
-            PlanNode::UnDropTable(_) => "UndropTablePlan",
-            PlanNode::RenameTable(_) => "RenameTablePlan",
-            PlanNode::TruncateTable(_) => "TruncateTablePlan",
-            PlanNode::OptimizeTable(_) => "OptimizeTablePlan",
-            PlanNode::ShowCreateTable(_) => "ShowCreateTablePlan",
-            PlanNode::DescribeTable(_) => "DescribeTablePlan",
-
-            // View.
-            PlanNode::CreateView(_) => "CreateViewPlan",
-            PlanNode::AlterView(_) => "AlterViewPlan",
-            PlanNode::DropView(_) => "DropViewPlan",
-
-            // User.
-            PlanNode::CreateUser(_) => "CreateUser",
-            PlanNode::AlterUser(_) => "AlterUser",
-            PlanNode::DropUser(_) => "DropUser",
-
-            // Grant.
-            PlanNode::GrantPrivilege(_) => "GrantPrivilegePlan",
-            PlanNode::GrantRole(_) => "GrantRolePlan",
-
-            // Revoke.
-            PlanNode::RevokePrivilege(_) => "RevokePrivilegePlan",
-            PlanNode::RevokeRole(_) => "RevokeRolePlan",
-
-            // Role.
-            PlanNode::CreateRole(_) => "CreateRole",
-            PlanNode::DropRole(_) => "DropRole",
-
-            // Stage.
-            PlanNode::CreateUserStage(_) => "CreateUserStagePlan",
-            PlanNode::DropUserStage(_) => "DropUserStagePlan",
-            PlanNode::DescribeUserStage(_) => "DescribeUserStagePlan",
-
-            // List
-            PlanNode::List(_) => "ListPlan",
-
-            // UDF.
-            PlanNode::CreateUserUDF(_) => "CreateUserUDFPlan",
-            PlanNode::DropUserUDF(_) => "DropUserUDFPlan",
-            PlanNode::AlterUserUDF(_) => "AlterUserUDFPlan",
-
-            // Use.
-            PlanNode::UseDatabase(_) => "UseDatabasePlan",
-
-            // Set.
-            PlanNode::SetVariable(_) => "SetVariablePlan",
-
-            // Kill.
-            PlanNode::Kill(_) => "KillQuery",
+            // Delete.
+            PlanNode::Delete(_) => "DeletePlan",
         }
     }
 
@@ -385,6 +155,7 @@ impl PlanNode {
             PlanNode::AggregatorFinal(v) => vec![v.input.clone()],
             PlanNode::Filter(v) => vec![v.input.clone()],
             PlanNode::Having(v) => vec![v.input.clone()],
+            PlanNode::WindowFunc(v) => vec![v.input.clone()],
             PlanNode::Limit(v) => vec![v.input.clone()],
             PlanNode::Explain(v) => vec![v.input.clone()],
             PlanNode::Select(v) => vec![v.input.clone()],

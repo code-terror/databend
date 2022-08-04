@@ -11,37 +11,44 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-//
 
 use std::any::Any;
 use std::convert::TryFrom;
 use std::sync::Arc;
 
+use common_cache::Cache;
 use common_datablocks::DataBlock;
 use common_exception::ErrorCode;
 use common_exception::Result;
-use common_meta_types::TableInfo;
+use common_fuse_meta::meta::ClusterKey;
+use common_fuse_meta::meta::Statistics as FuseStatistics;
+use common_fuse_meta::meta::TableSnapshot;
+use common_fuse_meta::meta::Versioned;
+use common_meta_app::schema::TableInfo;
+use common_meta_app::schema::TableMeta;
+use common_meta_app::schema::UpdateTableMetaReq;
+use common_meta_types::MatchSeq;
+use common_planners::DeletePlan;
 use common_planners::Expression;
 use common_planners::Extras;
+use common_planners::OptimizeTablePlan;
 use common_planners::Partitions;
 use common_planners::ReadDataSourcePlan;
 use common_planners::Statistics;
 use common_planners::TruncateTablePlan;
-use common_streams::SendableDataBlockStream;
-use common_tracing::tracing;
-use futures::StreamExt;
+use uuid::Uuid;
 
-use crate::pipelines::new::NewPipeline;
-use crate::sessions::QueryContext;
+use crate::pipelines::Pipeline;
+use crate::sessions::TableContext;
 use crate::sql::PlanParser;
 use crate::sql::OPT_KEY_DATABASE_ID;
 use crate::sql::OPT_KEY_LEGACY_SNAPSHOT_LOC;
 use crate::sql::OPT_KEY_SNAPSHOT_LOCATION;
+use crate::storages::fuse::io::write_meta;
 use crate::storages::fuse::io::MetaReaders;
 use crate::storages::fuse::io::TableMetaLocationGenerator;
-use crate::storages::fuse::meta::TableSnapshot;
-use crate::storages::fuse::meta::Versioned;
 use crate::storages::fuse::operations::AppendOperationLogEntry;
+use crate::storages::NavigationPoint;
 use crate::storages::StorageContext;
 use crate::storages::StorageDescription;
 use crate::storages::Table;
@@ -52,7 +59,8 @@ pub struct FuseTable {
     pub(crate) table_info: TableInfo,
     pub(crate) meta_location_generator: TableMetaLocationGenerator,
 
-    pub(crate) order_keys: Vec<Expression>,
+    pub(crate) cluster_keys: Vec<Expression>,
+    pub(crate) cluster_key_meta: Option<ClusterKey>,
     pub(crate) read_only: bool,
 }
 
@@ -64,14 +72,16 @@ impl FuseTable {
 
     pub fn do_create(table_info: TableInfo, read_only: bool) -> Result<Box<FuseTable>> {
         let storage_prefix = Self::parse_storage_prefix(&table_info)?;
-        let mut order_keys = Vec::new();
-        if let Some(order) = &table_info.meta.order_keys {
-            order_keys = PlanParser::parse_exprs(order)?;
+        let cluster_key_meta = table_info.meta.cluster_key();
+        let mut cluster_keys = Vec::new();
+        if let Some((_, order)) = &cluster_key_meta {
+            cluster_keys = PlanParser::parse_exprs(order)?;
         }
 
         Ok(Box::new(FuseTable {
             table_info,
-            order_keys,
+            cluster_keys,
+            cluster_key_meta,
             meta_location_generator: TableMetaLocationGenerator::with_prefix(storage_prefix),
             read_only,
         }))
@@ -81,16 +91,12 @@ impl FuseTable {
         StorageDescription {
             engine_name: "FUSE".to_string(),
             comment: "FUSE Storage Engine".to_string(),
-            support_order_key: true,
+            support_cluster_key: true,
         }
     }
 
     pub fn meta_location_generator(&self) -> &TableMetaLocationGenerator {
         &self.meta_location_generator
-    }
-
-    pub fn cluster_keys(&self) -> Vec<Expression> {
-        self.order_keys.clone()
     }
 
     pub fn parse_storage_prefix(table_info: &TableInfo) -> Result<String> {
@@ -110,7 +116,7 @@ impl FuseTable {
     #[tracing::instrument(level = "debug", skip(self, ctx), fields(ctx.id = ctx.get_id().as_str()))]
     pub(crate) async fn read_table_snapshot(
         &self,
-        ctx: &QueryContext,
+        ctx: &dyn TableContext,
     ) -> Result<Option<Arc<TableSnapshot>>> {
         if let Some(loc) = self.snapshot_loc() {
             let reader = MetaReaders::table_snapshot_reader(ctx);
@@ -161,6 +167,59 @@ impl FuseTable {
             Ok(())
         }
     }
+
+    pub async fn update_table_meta(
+        &self,
+        ctx: &dyn TableContext,
+        catalog_name: &str,
+        snapshot: &TableSnapshot,
+        meta: &mut TableMeta,
+    ) -> Result<()> {
+        let uuid = snapshot.snapshot_id;
+        let snapshot_loc = self
+            .meta_location_generator()
+            .snapshot_location_from_uuid(&uuid, TableSnapshot::VERSION)?;
+        let operator = ctx.get_storage_operator()?;
+        write_meta(&operator, &snapshot_loc, snapshot).await?;
+
+        // set new snapshot location
+        meta.options
+            .insert(OPT_KEY_SNAPSHOT_LOCATION.to_owned(), snapshot_loc.clone());
+        // remove legacy options
+        meta.options.remove(OPT_KEY_LEGACY_SNAPSHOT_LOC);
+
+        let table_id = self.table_info.ident.table_id;
+        let table_version = self.table_info.ident.seq;
+        let req = UpdateTableMetaReq {
+            table_id,
+            seq: MatchSeq::Exact(table_version),
+            new_table_meta: meta.clone(),
+        };
+
+        let catalog = ctx.get_catalog(catalog_name)?;
+        let result = catalog.update_table_meta(req).await;
+        match result {
+            Ok(_) => {
+                if let Some(snapshot_cache) =
+                    ctx.get_storage_cache_manager().get_table_snapshot_cache()
+                {
+                    let cache = &mut snapshot_cache.write().await;
+                    cache.put(snapshot_loc, Arc::new(snapshot.clone()));
+                }
+                Ok(())
+            }
+            Err(e) => {
+                // commit snapshot to meta server failed, try to delete it.
+                // "major GC" will collect this, if deletion failure (even after DAL retried)
+                let _ = operator.object(&snapshot_loc).delete().await;
+                Err(e)
+            }
+        }
+    }
+
+    pub fn transient(&self) -> bool {
+        self.table_info.meta.options.contains_key("TRANSIENT")
+    }
 }
 
 #[async_trait::async_trait]
@@ -185,58 +244,122 @@ impl Table for FuseTable {
         true
     }
 
+    fn cluster_keys(&self) -> Vec<Expression> {
+        self.cluster_keys.clone()
+    }
+
+    async fn alter_table_cluster_keys(
+        &self,
+        ctx: Arc<dyn TableContext>,
+        catalog_name: &str,
+        cluster_key_str: String,
+    ) -> Result<()> {
+        let mut new_table_meta = self.get_table_info().meta.clone();
+        new_table_meta = new_table_meta.push_cluster_key(cluster_key_str);
+        let cluster_key_meta = new_table_meta.cluster_key();
+        let schema = self.schema().as_ref().clone();
+
+        let prev = self.read_table_snapshot(ctx.as_ref()).await?;
+        let prev_version = self.snapshot_format_version();
+        let prev_timestamp = prev.as_ref().and_then(|v| v.timestamp);
+        let prev_snapshot_id = prev.as_ref().map(|v| (v.snapshot_id, prev_version));
+        let (summary, segments) = if let Some(v) = prev {
+            (v.summary.clone(), v.segments.clone())
+        } else {
+            (FuseStatistics::default(), vec![])
+        };
+
+        let new_snapshot = TableSnapshot::new(
+            Uuid::new_v4(),
+            &prev_timestamp,
+            prev_snapshot_id,
+            schema,
+            summary,
+            segments,
+            cluster_key_meta,
+        );
+
+        self.update_table_meta(
+            ctx.as_ref(),
+            catalog_name,
+            &new_snapshot,
+            &mut new_table_meta,
+        )
+        .await
+    }
+
+    async fn drop_table_cluster_keys(
+        &self,
+        ctx: Arc<dyn TableContext>,
+        catalog_name: &str,
+    ) -> Result<()> {
+        if self.cluster_key_meta.is_none() {
+            return Ok(());
+        }
+
+        let mut new_table_meta = self.get_table_info().meta.clone();
+        new_table_meta.default_cluster_key = None;
+        new_table_meta.default_cluster_key_id = None;
+
+        let schema = self.schema().as_ref().clone();
+
+        let prev = self.read_table_snapshot(ctx.as_ref()).await?;
+        let prev_version = self.snapshot_format_version();
+        let prev_timestamp = prev.as_ref().and_then(|v| v.timestamp);
+        let prev_snapshot_id = prev.as_ref().map(|v| (v.snapshot_id, prev_version));
+        let (summary, segments) = if let Some(v) = prev {
+            (v.summary.clone(), v.segments.clone())
+        } else {
+            (FuseStatistics::default(), vec![])
+        };
+
+        let new_snapshot = TableSnapshot::new(
+            Uuid::new_v4(),
+            &prev_timestamp,
+            prev_snapshot_id,
+            schema,
+            summary,
+            segments,
+            None,
+        );
+
+        self.update_table_meta(
+            ctx.as_ref(),
+            catalog_name,
+            &new_snapshot,
+            &mut new_table_meta,
+        )
+        .await
+    }
+
     #[tracing::instrument(level = "debug", name = "fuse_table_read_partitions", skip(self, ctx), fields(ctx.id = ctx.get_id().as_str()))]
     async fn read_partitions(
         &self,
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         push_downs: Option<Extras>,
     ) -> Result<(Statistics, Partitions)> {
         self.do_read_partitions(ctx, push_downs).await
     }
 
-    #[tracing::instrument(level = "debug", name = "fuse_table_read", skip(self, ctx), fields(ctx.id = ctx.get_id().as_str()))]
-    async fn read(
-        &self,
-        ctx: Arc<QueryContext>,
-        plan: &ReadDataSourcePlan,
-    ) -> Result<SendableDataBlockStream> {
-        self.do_read(ctx, &plan.push_downs)
-    }
-
     #[tracing::instrument(level = "debug", name = "fuse_table_read2", skip(self, ctx, pipeline), fields(ctx.id = ctx.get_id().as_str()))]
     fn read2(
         &self,
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         plan: &ReadDataSourcePlan,
-        pipeline: &mut NewPipeline,
+        pipeline: &mut Pipeline,
     ) -> Result<()> {
         self.do_read2(ctx, plan, pipeline)
     }
 
-    fn append2(&self, ctx: Arc<QueryContext>, pipeline: &mut NewPipeline) -> Result<()> {
+    fn append2(&self, ctx: Arc<dyn TableContext>, pipeline: &mut Pipeline) -> Result<()> {
         self.check_mutable()?;
         self.do_append2(ctx, pipeline)
     }
 
-    #[tracing::instrument(level = "debug", name = "fuse_table_append_data", skip(self, ctx, stream), fields(ctx.id = ctx.get_id().as_str()))]
-    async fn append_data(
-        &self,
-        ctx: Arc<QueryContext>,
-        stream: SendableDataBlockStream,
-    ) -> Result<SendableDataBlockStream> {
-        self.check_mutable()?;
-        let log_entry_stream = self.append_chunks(ctx, stream).await?;
-        let data_block_stream =
-            log_entry_stream.map(|append_log_entry_res| match append_log_entry_res {
-                Ok(log_entry) => DataBlock::try_from(log_entry),
-                Err(err) => Err(err),
-            });
-        Ok(Box::pin(data_block_stream))
-    }
-
+    #[tracing::instrument(level = "debug", name = "fuse_table_commit_insertion", skip(self, ctx, operations), fields(ctx.id = ctx.get_id().as_str()))]
     async fn commit_insertion(
         &self,
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         catalog_name: &str,
         operations: Vec<DataBlock>,
         overwrite: bool,
@@ -251,27 +374,56 @@ impl Table for FuseTable {
             .await
     }
 
+    #[tracing::instrument(level = "debug", name = "fuse_table_truncate", skip(self, ctx), fields(ctx.id = ctx.get_id().as_str()))]
     async fn truncate(
         &self,
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         truncate_plan: TruncateTablePlan,
     ) -> Result<()> {
         self.check_mutable()?;
-        self.do_truncate(ctx, truncate_plan).await
+        self.do_truncate(ctx, truncate_plan.purge, truncate_plan.catalog.as_str())
+            .await
     }
 
-    async fn optimize(&self, ctx: Arc<QueryContext>, keep_last_snapshot: bool) -> Result<()> {
+    #[tracing::instrument(level = "debug", name = "fuse_table_optimize", skip(self, ctx), fields(ctx.id = ctx.get_id().as_str()))]
+    async fn optimize(&self, ctx: Arc<dyn TableContext>, keep_last_snapshot: bool) -> Result<()> {
         self.check_mutable()?;
-        self.do_optimize(ctx, keep_last_snapshot).await
+        self.do_gc(&ctx, keep_last_snapshot).await
     }
 
-    async fn statistics(&self, _ctx: Arc<QueryContext>) -> Result<Option<TableStatistics>> {
+    async fn statistics(&self, _ctx: Arc<dyn TableContext>) -> Result<Option<TableStatistics>> {
         let s = &self.table_info.meta.statistics;
         Ok(Some(TableStatistics {
             num_rows: Some(s.number_of_rows),
             data_size: Some(s.data_bytes),
             data_size_compressed: Some(s.compressed_data_bytes),
-            index_length: None, // we do not have it yet
+            index_size: Some(s.index_data_bytes),
         }))
+    }
+
+    #[tracing::instrument(level = "debug", name = "fuse_table_navigate_to", skip(self, ctx), fields(ctx.id = ctx.get_id().as_str()))]
+    async fn navigate_to(
+        &self,
+        ctx: Arc<dyn TableContext>,
+        point: &NavigationPoint,
+    ) -> Result<Arc<dyn Table>> {
+        match point {
+            NavigationPoint::SnapshotID(snapshot_id) => Ok(self
+                .navigate_to_snapshot(ctx.as_ref(), snapshot_id.as_str())
+                .await?),
+            NavigationPoint::TimePoint(time_point) => Ok(self
+                .navigate_to_time_point(ctx.as_ref(), *time_point)
+                .await?),
+        }
+    }
+
+    #[tracing::instrument(level = "debug", name = "fuse_table_delete", skip(self, ctx), fields(ctx.id = ctx.get_id().as_str()))]
+    async fn delete(&self, ctx: Arc<dyn TableContext>, delete_plan: DeletePlan) -> Result<()> {
+        self.do_delete(ctx, &delete_plan).await
+    }
+
+    #[tracing::instrument(level = "debug", name = "fuse_table_compact", skip(self, ctx), fields(ctx.id = ctx.get_id().as_str()))]
+    async fn compact(&self, ctx: Arc<dyn TableContext>, plan: OptimizeTablePlan) -> Result<()> {
+        self.do_compact(ctx, &plan).await
     }
 }

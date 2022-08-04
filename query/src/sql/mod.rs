@@ -13,12 +13,12 @@
 // limitations under the License.
 
 mod common;
-pub mod exec;
+pub mod executor;
 mod metrics;
 pub mod optimizer;
 mod parsers;
 mod plan_parser;
-mod planner;
+pub mod planner;
 mod sql_common;
 mod sql_parser;
 mod sql_statement;

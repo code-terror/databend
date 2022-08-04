@@ -14,9 +14,10 @@
 
 use common_base::base::tokio;
 use common_exception::Result;
-use databend_query::interpreters::InterpreterFactory;
-use databend_query::sql::PlanParser;
+use databend_query::interpreters::InterpreterFactoryV2;
+use databend_query::sql::Planner;
 
+// ref: https://github.com/datafuselabs/databend/issues/6901
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_management_mode_access() -> Result<()> {
     struct TestGroup {
@@ -152,12 +153,13 @@ async fn test_management_mode_access() -> Result<()> {
         .with_management_mode()
         .config();
     let ctx = crate::tests::create_query_context_with_config(conf.clone(), None).await?;
+    let mut planner = Planner::new(ctx.clone());
 
     for group in groups {
         for test in group.tests {
-            let plan = PlanParser::parse(ctx.clone(), test.query).await?;
-            let interpreter = InterpreterFactory::get(ctx.clone(), plan)?;
-            let res = interpreter.execute(None).await;
+            let (plan, _, _) = planner.plan_sql(test.query).await?;
+            let interpreter = InterpreterFactoryV2::get(ctx.clone(), &plan)?;
+            let res = interpreter.execute().await;
             assert_eq!(
                 test.is_err,
                 res.is_err(),

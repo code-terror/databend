@@ -17,12 +17,12 @@ use std::sync::Arc;
 
 use common_exception::ErrorCode;
 use common_exception::Result;
+use common_http::HttpShutdownHandler;
 use common_metrics::PrometheusHandle;
 use poem::web::Data;
 use poem::EndpointExt;
 use poem::IntoResponse;
 
-use crate::common::service::HttpShutdownHandler;
 use crate::servers::Server;
 use crate::sessions::SessionManager;
 

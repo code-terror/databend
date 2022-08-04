@@ -1,17 +1,27 @@
 from abc import ABC
 from datetime import datetime, date
-from types import NoneType
 
 import mysql.connector
 
 import logictest
 from log import log
 
+import mysql.connector
+from mysql.connector.conversion import MySQLConverter
+
+
+class StringConverter(MySQLConverter):
+
+    def _DATETIME_to_python(self, value, dsc=None):
+        if not value:
+            return None
+        return MySQLConverter._STRING_to_python(self, value)
+
 
 class TestMySQL(logictest.SuiteRunner, ABC):
 
-    def __init__(self, kind):
-        super().__init__(kind)
+    def __init__(self, kind, args):
+        super().__init__(kind, args)
         self._connection = None
 
     def reset_connection(self):
@@ -22,6 +32,8 @@ class TestMySQL(logictest.SuiteRunner, ABC):
     def get_connection(self):
         if self._connection is not None:
             return self._connection
+        if "converter_class" not in self.driver:
+            self.driver["converter_class"] = StringConverter
         self._connection = mysql.connector.connect(**self.driver)
         return self._connection
 
@@ -51,34 +63,35 @@ class TestMySQL(logictest.SuiteRunner, ABC):
         vals = []
         for (ri, row) in enumerate(r):
             for (i, v) in enumerate(row):
-                if isinstance(v, NoneType):
-                    vals.append("None")
+                if isinstance(v, type(None)):
+                    vals.append("NULL")
                     continue
+
                 if query_type[i] == 'I':
                     if not isinstance(v, int):
-                        log.error(
-                            "Expected int, got type {} in query {} row {} col {} value {}"
-                            .format(type(v), statement.text, ri, i, v))
+                        log.debug(
+                            f"Expected int, got type {type(v)} in query {statement.text} row {ri} col {i} value {v}"
+                        )
                 elif query_type[i] == 'F' or query_type[i] == 'R':
                     if not isinstance(v, float):
-                        log.error(
-                            "Expected float, got type {} in query {} row {} col {} value {}"
-                            .format(type(v), statement.text, ri, i, v))
+                        log.debug(
+                            f"Expected float, got type {type(v)} in query {statement.text} row {ri} col {i} value {v}"
+                        )
                 elif query_type[i] == 'T':
                     if not (isinstance(v, str) or isinstance(v, datetime) or
                             isinstance(v, date)):
-                        log.error(
-                            "Expected string, got type {} in query {} row {} col {} value {}"
-                            .format(type(v), statement.text, ri, i, v))
+                        log.debug(
+                            f"Expected string, got type {type(v)} in query { statement.text} row {ri} col {i} value {v}"
+                        )
                 elif query_type[i] == 'B':
                     # bool return int in mysql
                     if not isinstance(v, int):
-                        log.error(
-                            "Expected Bool, got type {} in query {} row {} col {} value {}"
-                            .format(type(v), statement.text, ri, i, v))
+                        log.debug(
+                            f"Expected Bool, got type {type(v)} in query {statement.text} row {ri} col {i} value {v}"
+                        )
                 else:
-                    log.error(
-                        "Unknown type {} in query {} row {} col {} value {}".
-                        format(query_type[i], statement.text, ri, i, v))
+                    log.debug(
+                        f"Unknown type {query_type[i]} in query {statement.text} row {ri} col {i} value {v}"
+                    )
                 vals.append(str(v))
         return vals

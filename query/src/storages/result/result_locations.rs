@@ -13,10 +13,9 @@
 // limitations under the License.
 
 use common_datablocks::DataBlock;
+use common_fuse_meta::meta::SegmentInfo;
+use common_fuse_meta::meta::Versioned;
 use uuid::Uuid;
-
-use crate::storages::fuse::meta::SegmentInfo;
-use crate::storages::fuse::meta::Versioned;
 
 pub const RESULT_CACHE_PREFIX: &str = "_res";
 
@@ -36,7 +35,7 @@ impl ResultLocations {
     }
 
     pub fn gen_block_location(&self) -> String {
-        let part_uuid = Uuid::new_v4().to_simple().to_string();
+        let part_uuid = Uuid::new_v4().simple().to_string();
         format!(
             "{}/_t/part-{}_v{}.parquet",
             &self.prefix,

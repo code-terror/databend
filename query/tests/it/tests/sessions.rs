@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::env;
 use std::sync::Arc;
 
 use common_base::base::tokio::runtime::Runtime;
 use common_base::base::Thread;
 use common_exception::Result;
-use common_io::prelude::StorageFsConfig;
-use common_io::prelude::StorageParams;
+use common_storage::StorageFsConfig;
+use common_storage::StorageParams;
 use databend_query::sessions::SessionManager;
 use databend_query::Config;
 
@@ -42,11 +41,9 @@ pub struct SessionManagerBuilder {
 
 impl SessionManagerBuilder {
     pub fn create() -> SessionManagerBuilder {
-        let mut conf = crate::tests::ConfigBuilder::create().config();
-        if conf.query.num_cpus == 0 {
-            conf.query.num_cpus = num_cpus::get() as u64;
-        }
-        SessionManagerBuilder::create_with_conf(conf).log_dir_with_relative("../tests/data/logs")
+        let conf = crate::tests::ConfigBuilder::create().config();
+
+        SessionManagerBuilder::create_with_conf(conf)
     }
 
     pub fn create_with_conf(config: Config) -> SessionManagerBuilder {
@@ -126,17 +123,6 @@ impl SessionManagerBuilder {
         let mut new_config = self.config;
 
         new_config.storage.params = StorageParams::Fs(StorageFsConfig { root: path });
-        SessionManagerBuilder::create_with_conf(new_config)
-    }
-
-    pub fn log_dir_with_relative(self, path: impl Into<String>) -> SessionManagerBuilder {
-        let mut new_config = self.config;
-        new_config.log.dir = env::current_dir()
-            .unwrap()
-            .join(path.into())
-            .display()
-            .to_string();
-
         SessionManagerBuilder::create_with_conf(new_config)
     }
 

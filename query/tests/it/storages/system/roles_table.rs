@@ -15,7 +15,9 @@
 use common_base::base::tokio;
 use common_exception::Result;
 use common_meta_types::RoleInfo;
+use databend_query::sessions::TableContext;
 use databend_query::storages::system::RolesTable;
+use databend_query::storages::TableStreamReadWrap;
 use databend_query::storages::ToReadDataSourcePlan;
 use futures::TryStreamExt;
 

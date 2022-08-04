@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use common_exception::ErrorCode;
 use common_exception::Result;
-use common_meta_types::TableInfo;
+use common_meta_app::schema::TableInfo;
 
 use crate::storages::StorageContext;
 use crate::storages::StorageDescription;
@@ -43,7 +43,7 @@ impl ViewTable {
         }
     }
 
-    /** When using `create`, must provide query in table_info */
+    /// When using `create`, must provide query in table_info
     pub fn create(table_info: TableInfo) -> Arc<dyn Table> {
         let query = table_info.options().get(QUERY).cloned();
         if let Some(query) = query {

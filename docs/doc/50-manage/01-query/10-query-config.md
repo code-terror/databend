@@ -94,9 +94,21 @@ If `endpoints` is configured, the `address` configuration will no longer take ef
 
 ### clickhouse_handler_port
 
-* The port to listen on for ClickHouse handler, e.g., `3307`.
+* The port to listen on for ClickHouse handler, e.g., `9000`.
 * Default: `9000`
 * Env variable: `QUERY_CLICKHOUSE_HANDLER_PORT`
+
+### clickhouse_http_handler_host
+
+* The IP address to listen on for ClickHouse HTTP handler, e.g., `0.0.0.0`.
+* Default: `"127.0.0.1"`
+* Env variable: `QUERY_CLICKHOUSE_HTTP_HANDLER_HOST`
+
+### clickhouse_http_handler_port
+
+* The port to listen on for ClickHouse HTTP handler, e.g., `8124`.
+* Default: `8124`
+* Env variable: `QUERY_CLICKHOUSE_HTTP_HANDLER_PORT`
 
 ### tenant_id
 
@@ -181,6 +193,8 @@ If `endpoints` is configured, the `address` configuration will no longer take ef
 
 ## A Toml File Demo
 
+For ease of experience, set all hosts to 0.0.0.0. Exercise caution when setting host if the application is in production.
+
 ```toml title="databend-query.toml"
 # Logging
 [log]
@@ -189,30 +203,30 @@ dir = "benddata/_logs"
 
 # Meta Service
 [meta]
-address = "127.0.0.1:9101"
+address = "0.0.0.0:9101"
 username = "root"
 password = "root"
 
 [query]
 # For admin RESET API.
-admin_api_address = "127.0.0.1:8001"
+admin_api_address = "0.0.0.0:8001"
 
 # Metrics.
-metric_api_address = "127.0.0.1:7071"
+metric_api_address = "0.0.0.0:7071"
 
 # Cluster flight RPC.
-flight_api_address = "127.0.0.1:9091"
+flight_api_address = "0.0.0.0:9091"
 
 # Query MySQL Handler.
-mysql_handler_host = "127.0.0.1"
+mysql_handler_host = "0.0.0.0"
 mysql_handler_port = 3307
 
 # Query ClickHouse Handler.
-clickhouse_handler_host = "127.0.0.1"
+clickhouse_handler_host = "0.0.0.0"
 clickhouse_handler_port = 9001
 
 # Query HTTP Handler.
-http_handler_host = "127.0.0.1"
+http_handler_host = "0.0.0.0"
 http_handler_port = 8081
 
 tenant_id = "tenant1"

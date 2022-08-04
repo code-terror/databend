@@ -20,6 +20,7 @@ use common_ast::ast::Join;
 use common_ast::ast::JoinCondition;
 use common_ast::ast::JoinOperator;
 use common_datavalues::type_coercion::merge_types;
+use common_datavalues::wrap_nullable;
 use common_exception::ErrorCode;
 use common_exception::Result;
 
@@ -33,7 +34,7 @@ use crate::sql::planner::binder::scalar::ScalarBinder;
 use crate::sql::planner::binder::Binder;
 use crate::sql::planner::metadata::MetadataRef;
 use crate::sql::plans::BoundColumnRef;
-use crate::sql::plans::FilterPlan;
+use crate::sql::plans::JoinType;
 use crate::sql::plans::LogicalInnerJoin;
 use crate::sql::plans::Scalar;
 use crate::sql::plans::ScalarExpr;
@@ -48,19 +49,59 @@ impl<'a> Binder {
     ) -> Result<(SExpr, BindContext)> {
         let (left_child, left_context) =
             self.bind_table_reference(bind_context, &join.left).await?;
-        let (right_child, right_context) = self
-            .bind_table_reference(&left_context, &join.right)
-            .await?;
+        let (right_child, right_context) =
+            self.bind_table_reference(bind_context, &join.right).await?;
 
         check_duplicate_join_tables(&left_context, &right_context)?;
 
-        let mut bind_context = BindContext::new();
-        for column in left_context.all_column_bindings() {
-            bind_context.add_column_binding(column.clone());
+        let mut bind_context = bind_context.replace();
+
+        match &join.op {
+            JoinOperator::LeftOuter => {
+                for column in left_context.all_column_bindings() {
+                    bind_context.add_column_binding(column.clone());
+                }
+                for column in right_context.all_column_bindings().iter() {
+                    let mut nullable_column = column.clone();
+                    nullable_column.data_type = Box::new(wrap_nullable(&column.data_type));
+                    bind_context.add_column_binding(nullable_column);
+                }
+            }
+            JoinOperator::RightOuter => {
+                for column in left_context.all_column_bindings() {
+                    let mut nullable_column = column.clone();
+                    nullable_column.data_type = Box::new(wrap_nullable(&column.data_type));
+                    bind_context.add_column_binding(nullable_column);
+                }
+                for column in right_context.all_column_bindings().iter() {
+                    bind_context.add_column_binding(column.clone());
+                }
+            }
+            _ => {
+                for column in left_context.all_column_bindings() {
+                    bind_context.add_column_binding(column.clone());
+                }
+                for column in right_context.all_column_bindings() {
+                    bind_context.add_column_binding(column.clone());
+                }
+            }
         }
-        for column in right_context.all_column_bindings() {
-            bind_context.add_column_binding(column.clone());
-        }
+
+        match &join.op {
+            JoinOperator::LeftOuter | JoinOperator::RightOuter | JoinOperator::FullOuter
+                if join.condition == JoinCondition::None =>
+            {
+                return Err(ErrorCode::SemanticError(
+                    "outer join should contain join conditions".to_string(),
+                ));
+            }
+            JoinOperator::CrossJoin if join.condition != JoinCondition::None => {
+                return Err(ErrorCode::SemanticError(
+                    "cross join should not contain join conditions".to_string(),
+                ));
+            }
+            _ => (),
+        };
 
         let mut left_join_conditions: Vec<Scalar> = vec![];
         let mut right_join_conditions: Vec<Scalar> = vec![];
@@ -81,48 +122,75 @@ impl<'a> Binder {
             )
             .await?;
 
-        let mut s_expr = match &join.op {
-            JoinOperator::Inner => self.bind_inner_join(
+        let s_expr = match &join.op {
+            JoinOperator::Inner => self.bind_join_with_type(
+                JoinType::Inner,
                 left_join_conditions,
                 right_join_conditions,
+                other_conditions,
                 left_child,
                 right_child,
             ),
-            JoinOperator::LeftOuter => Err(ErrorCode::UnImplement(
-                "Unsupported join type: LEFT OUTER JOIN",
-            )),
-            JoinOperator::RightOuter => Err(ErrorCode::UnImplement(
-                "Unsupported join type: RIGHT OUTER JOIN",
-            )),
-            JoinOperator::FullOuter => Err(ErrorCode::UnImplement(
-                "Unsupported join type: FULL OUTER JOIN",
-            )),
-            JoinOperator::CrossJoin => {
-                Err(ErrorCode::UnImplement("Unsupported join type: CROSS JOIN"))
-            }
+            JoinOperator::LeftOuter => self.bind_join_with_type(
+                JoinType::Left,
+                left_join_conditions,
+                right_join_conditions,
+                other_conditions,
+                left_child,
+                right_child,
+            ),
+            JoinOperator::RightOuter => self.bind_join_with_type(
+                JoinType::Left,
+                right_join_conditions,
+                left_join_conditions,
+                other_conditions,
+                right_child,
+                left_child,
+            ),
+            JoinOperator::FullOuter => self.bind_join_with_type(
+                JoinType::Full,
+                left_join_conditions,
+                right_join_conditions,
+                other_conditions,
+                left_child,
+                right_child,
+            ),
+            JoinOperator::CrossJoin => self.bind_join_with_type(
+                JoinType::Cross,
+                left_join_conditions,
+                right_join_conditions,
+                other_conditions,
+                left_child,
+                right_child,
+            ),
         }?;
-
-        if !other_conditions.is_empty() {
-            let filter_plan = FilterPlan {
-                predicates: other_conditions,
-                is_having: false,
-            };
-            s_expr = SExpr::create_unary(filter_plan.into(), s_expr);
-        }
 
         Ok((s_expr, bind_context))
     }
 
-    fn bind_inner_join(
+    pub fn bind_join_with_type(
         &mut self,
+        join_type: JoinType,
         left_conditions: Vec<Scalar>,
         right_conditions: Vec<Scalar>,
+        other_conditions: Vec<Scalar>,
         left_child: SExpr,
         right_child: SExpr,
     ) -> Result<SExpr> {
+        if join_type == JoinType::Cross
+            && (!left_conditions.is_empty() || !right_conditions.is_empty())
+        {
+            return Err(ErrorCode::SemanticError(
+                "Join conditions should be empty in cross join",
+            ));
+        }
         let inner_join = LogicalInnerJoin {
             left_conditions,
             right_conditions,
+            other_conditions,
+            join_type,
+            marker_index: None,
+            from_correlated_subquery: false,
         };
         let expr = SExpr::create_binary(inner_join.into(), left_child, right_child);
 
@@ -225,9 +293,7 @@ impl<'a> JoinConditionResolver<'a> {
                 self.resolve_using(using_columns, left_join_conditions, right_join_conditions)
                     .await?
             }
-            JoinCondition::None => {
-                return Err(ErrorCode::UnImplement("JOIN without condition is not supported yet. Please specify join condition with ON clause."));
-            }
+            JoinCondition::None => {}
         }
         Ok(())
     }

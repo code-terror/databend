@@ -18,15 +18,15 @@ use chrono::Utc;
 use common_base::base::tokio;
 use common_datavalues::prelude::*;
 use common_exception::Result;
-use common_meta_types::CreateDatabaseReq;
-use common_meta_types::CreateTableReq;
-use common_meta_types::DatabaseMeta;
-use common_meta_types::DatabaseNameIdent;
-use common_meta_types::DropDatabaseReq;
-use common_meta_types::DropTableReq;
-use common_meta_types::RenameDatabaseReq;
-use common_meta_types::TableMeta;
-use common_meta_types::TableNameIdent;
+use common_meta_app::schema::CreateDatabaseReq;
+use common_meta_app::schema::CreateTableReq;
+use common_meta_app::schema::DatabaseMeta;
+use common_meta_app::schema::DatabaseNameIdent;
+use common_meta_app::schema::DropDatabaseReq;
+use common_meta_app::schema::DropTableReq;
+use common_meta_app::schema::RenameDatabaseReq;
+use common_meta_app::schema::TableMeta;
+use common_meta_app::schema::TableNameIdent;
 use databend_query::catalogs::Catalog;
 
 use crate::tests::create_catalog;
@@ -34,7 +34,7 @@ use crate::tests::create_catalog;
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_catalogs_get_database() -> Result<()> {
     let tenant = "test";
-    let catalog = create_catalog()?;
+    let catalog = create_catalog().await?;
 
     // get system database
     let database = catalog.get_database(tenant, "system").await?;
@@ -61,7 +61,7 @@ async fn test_catalogs_get_database() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_catalogs_database() -> Result<()> {
     let tenant = "admin";
-    let catalog = create_catalog()?;
+    let catalog = create_catalog().await?;
 
     let db_list = catalog.list_databases(tenant).await?;
     let db_count = db_list.len();
@@ -153,7 +153,7 @@ async fn test_catalogs_database() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_catalogs_table() -> Result<()> {
     let tenant = "test";
-    let catalog = create_catalog()?;
+    let catalog = create_catalog().await?;
 
     // Check system/default.
     {

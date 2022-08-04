@@ -23,6 +23,8 @@ use common_arrow::arrow::buffer::Buffer;
 use common_arrow::arrow::compute::cast::binary_to_large_binary;
 use common_arrow::arrow::datatypes::DataType as ArrowType;
 use common_arrow::arrow::types::Index;
+use common_arrow::ArrayRef;
+use common_io::prelude::BinaryWrite;
 pub use iterator::*;
 pub use mutable::*;
 
@@ -153,9 +155,9 @@ impl Column for StringColumn {
         self.values.len() + self.offsets.len() * std::mem::size_of::<i64>()
     }
 
-    fn as_arrow_array(&self) -> ArrayRef {
-        Arc::new(LargeBinaryArray::from_data(
-            ArrowType::LargeBinary,
+    fn as_arrow_array(&self, logical_type: DataTypeImpl) -> ArrayRef {
+        Box::new(LargeBinaryArray::from_data(
+            logical_type.arrow_type(),
             self.offsets.clone(),
             self.values.clone(),
             None,
@@ -198,6 +200,11 @@ impl Column for StringColumn {
         // soundness: the invariant of the struct
         let str = unsafe { self.values.get_unchecked(start..end) };
         DataValue::String(str.to_vec())
+    }
+
+    fn serialize(&self, vec: &mut Vec<u8>, row: usize) {
+        let value = self.get_data(row);
+        BinaryWrite::write_binary(vec, value).unwrap()
     }
 }
 

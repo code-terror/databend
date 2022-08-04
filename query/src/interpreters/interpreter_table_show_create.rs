@@ -20,11 +20,11 @@ use common_exception::Result;
 use common_planners::ShowCreateTablePlan;
 use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
-use common_tracing::tracing;
+use tracing::debug;
 
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 use crate::sql::is_internal_opt_key;
 use crate::sql::PlanParser;
 
@@ -34,8 +34,8 @@ pub struct ShowCreateTableInterpreter {
 }
 
 impl ShowCreateTableInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, plan: ShowCreateTablePlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(ShowCreateTableInterpreter { ctx, plan }))
+    pub fn try_create(ctx: Arc<QueryContext>, plan: ShowCreateTablePlan) -> Result<Self> {
+        Ok(ShowCreateTableInterpreter { ctx, plan })
     }
 }
 
@@ -45,27 +45,30 @@ impl Interpreter for ShowCreateTableInterpreter {
         "ShowCreateTableInterpreter"
     }
 
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    fn schema(&self) -> DataSchemaRef {
+        self.plan.schema()
+    }
+
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         let tenant = self.ctx.get_tenant();
         let catalog = self.ctx.get_catalog(self.plan.catalog.as_str())?;
 
         let table = catalog
-            .get_table(tenant.as_str(), &self.plan.db, &self.plan.table)
+            .get_table(tenant.as_str(), &self.plan.database, &self.plan.table)
             .await?;
 
         let name = table.name();
         let engine = table.engine();
         let schema = table.schema();
+        let field_comments = table.field_comments();
+        let n_fields = schema.fields().len();
 
         let mut table_create_sql = format!("CREATE TABLE `{}` (\n", name);
 
         // Append columns.
         {
             let mut columns = vec![];
-            for field in schema.fields().iter() {
+            for (idx, field) in schema.fields().iter().enumerate() {
                 let default_expr = match field.default_expr() {
                     Some(expr) => {
                         let expression = PlanParser::parse_expr(expr)?;
@@ -73,12 +76,25 @@ impl Interpreter for ShowCreateTableInterpreter {
                     }
                     None => "".to_string(),
                 };
+                // compatibility: creating table in the old planner will not have `fields_comments`
+                let comment = if field_comments.len() == n_fields && !field_comments[idx].is_empty()
+                {
+                    // make the display more readable.
+                    format!(
+                        " COMMENT '{}'",
+                        &field_comments[idx].as_str().replace('\'', "\\'")
+                    )
+                } else {
+                    "".to_string()
+                };
                 let column = format!(
-                    "  `{}` {}{}",
+                    "  `{}` {}{}{}",
                     field.name(),
                     format_data_type_sql(field.data_type()),
-                    default_expr
+                    default_expr,
+                    comment
                 );
+
                 columns.push(column);
             }
             // Format is:
@@ -94,8 +110,8 @@ impl Interpreter for ShowCreateTableInterpreter {
         table_create_sql.push_str(table_engine.as_str());
 
         let table_info = table.get_table_info();
-        if let Some(order_keys_str) = &table_info.meta.order_keys {
-            table_create_sql.push_str(format!(" CLUSTER BY {}", order_keys_str).as_str());
+        if let Some((_, cluster_keys_str)) = table_info.meta.cluster_key() {
+            table_create_sql.push_str(format!(" CLUSTER BY {}", cluster_keys_str).as_str());
         }
 
         table_create_sql.push_str({
@@ -109,17 +125,12 @@ impl Interpreter for ShowCreateTableInterpreter {
                 .as_str()
         });
 
-        let show_fields = vec![
-            DataField::new("Table", Vu8::to_data_type()),
-            DataField::new("Create Table", Vu8::to_data_type()),
-        ];
-        let show_schema = DataSchemaRefExt::create(show_fields);
-
+        let show_schema = self.plan.schema();
         let block = DataBlock::create(show_schema.clone(), vec![
             Series::from_data(vec![name.as_bytes()]),
             Series::from_data(vec![table_create_sql.into_bytes()]),
         ]);
-        tracing::debug!("Show create table executor result: {:?}", block);
+        debug!("Show create table executor result: {:?}", block);
 
         Ok(Box::pin(DataBlockStream::create(show_schema, None, vec![
             block,

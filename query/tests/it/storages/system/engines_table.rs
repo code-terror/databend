@@ -15,6 +15,7 @@
 use common_base::base::tokio;
 use common_exception::Result;
 use databend_query::storages::system::EnginesTable;
+use databend_query::storages::TableStreamReadWrap;
 use databend_query::storages::ToReadDataSourcePlan;
 use futures::TryStreamExt;
 
@@ -32,10 +33,11 @@ async fn test_engines_table() -> Result<()> {
         "+--------+-----------------------------+",
         "| Engine | Comment                     |",
         "+--------+-----------------------------+",
-        "| FUSE   | FUSE Storage Engine         |",
         "| GITHUB | GITHUB Storage Engine       |",
-        "| MEMORY | MEMORY Storage Engine       |",
         "| NULL   | NULL Storage Engine         |",
+        "| FUSE   | FUSE Storage Engine         |",
+        "| RANDOM | RANDOM Storage Engine       |",
+        "| MEMORY | MEMORY Storage Engine       |",
         "| VIEW   | VIEW STORAGE (LOGICAL VIEW) |",
         "+--------+-----------------------------+",
     ];

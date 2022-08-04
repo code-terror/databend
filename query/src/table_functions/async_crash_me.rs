@@ -11,10 +11,8 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-//
 
 use std::any::Any;
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
@@ -26,24 +24,23 @@ use common_datavalues::chrono::TimeZone;
 use common_datavalues::chrono::Utc;
 use common_datavalues::prelude::*;
 use common_exception::Result;
-use common_meta_types::TableIdent;
-use common_meta_types::TableInfo;
-use common_meta_types::TableMeta;
+use common_meta_app::schema::TableIdent;
+use common_meta_app::schema::TableInfo;
+use common_meta_app::schema::TableMeta;
 use common_planners::Expression;
 use common_planners::Extras;
 use common_planners::Partitions;
 use common_planners::ReadDataSourcePlan;
 use common_planners::Statistics;
-use common_streams::SendableDataBlockStream;
 use futures::Stream;
 
-use crate::pipelines::new::processors::port::OutputPort;
-use crate::pipelines::new::processors::processor::ProcessorPtr;
-use crate::pipelines::new::processors::AsyncSource;
-use crate::pipelines::new::processors::AsyncSourcer;
-use crate::pipelines::new::NewPipe;
-use crate::pipelines::new::NewPipeline;
-use crate::sessions::QueryContext;
+use crate::pipelines::processors::port::OutputPort;
+use crate::pipelines::processors::processor::ProcessorPtr;
+use crate::pipelines::processors::AsyncSource;
+use crate::pipelines::processors::AsyncSourcer;
+use crate::pipelines::Pipe;
+use crate::pipelines::Pipeline;
+use crate::sessions::TableContext;
 use crate::storages::Table;
 use crate::table_functions::table_function_factory::TableArgs;
 use crate::table_functions::TableFunction;
@@ -80,6 +77,7 @@ impl AsyncCrashMeTable {
                 // Assuming that created_on is unnecessary for function table,
                 // we could make created_on fixed to pass test_shuffle_action_try_into.
                 created_on: Utc.from_utc_datetime(&NaiveDateTime::from_timestamp(0, 0)),
+                updated_on: Utc.from_utc_datetime(&NaiveDateTime::from_timestamp(0, 0)),
                 ..Default::default()
             },
         };
@@ -107,7 +105,7 @@ impl Table for AsyncCrashMeTable {
 
     async fn read_partitions(
         &self,
-        _: Arc<QueryContext>,
+        _: Arc<dyn TableContext>,
         _: Option<Extras>,
     ) -> Result<(Statistics, Partitions)> {
         // dummy statistics
@@ -118,24 +116,14 @@ impl Table for AsyncCrashMeTable {
         Some(vec![Expression::create_literal(DataValue::UInt64(0))])
     }
 
-    async fn read(
-        &self,
-        _ctx: Arc<QueryContext>,
-        _plan: &ReadDataSourcePlan,
-    ) -> Result<SendableDataBlockStream> {
-        Ok(Box::pin(AsyncCrashMeStream {
-            message: self.panic_message.clone(),
-        }))
-    }
-
     fn read2(
         &self,
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         _plan: &ReadDataSourcePlan,
-        pipeline: &mut NewPipeline,
+        pipeline: &mut Pipeline,
     ) -> Result<()> {
         let output = OutputPort::create();
-        pipeline.add_pipe(NewPipe::SimplePipe {
+        pipeline.add_pipe(Pipe::SimplePipe {
             inputs_port: vec![],
             outputs_port: vec![output.clone()],
             processors: vec![AsyncCrashMeSource::create(
@@ -155,7 +143,7 @@ struct AsyncCrashMeSource {
 
 impl AsyncCrashMeSource {
     pub fn create(
-        ctx: Arc<QueryContext>,
+        ctx: Arc<dyn TableContext>,
         output: Arc<OutputPort>,
         message: Option<String>,
     ) -> Result<ProcessorPtr> {
@@ -163,16 +151,15 @@ impl AsyncCrashMeSource {
     }
 }
 
+#[async_trait::async_trait]
 impl AsyncSource for AsyncCrashMeSource {
     const NAME: &'static str = "async_crash_me";
-    type BlockFuture<'a> = impl Future<Output=Result<Option<DataBlock>>> where Self: 'a;
 
-    fn generate(&mut self) -> Self::BlockFuture<'_> {
-        async {
-            match &self.message {
-                None => panic!("async crash me panic"),
-                Some(message) => panic!("{}", message),
-            }
+    #[async_trait::unboxed_simple]
+    async fn generate(&mut self) -> Result<Option<DataBlock>> {
+        match &self.message {
+            None => panic!("async crash me panic"),
+            Some(message) => panic!("{}", message),
         }
     }
 }

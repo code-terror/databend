@@ -17,10 +17,14 @@ use common_exception::Result;
 
 use crate::sql::binder::scalar_visitor::Recursion;
 use crate::sql::binder::scalar_visitor::ScalarVisitor;
+use crate::sql::optimizer::RelationalProperty;
 use crate::sql::plans::AndExpr;
+use crate::sql::plans::BoundColumnRef;
 use crate::sql::plans::CastExpr;
 use crate::sql::plans::ComparisonExpr;
 use crate::sql::plans::ComparisonOp;
+use crate::sql::plans::FunctionCall;
+use crate::sql::plans::OrExpr;
 use crate::sql::plans::Scalar;
 use crate::sql::plans::ScalarExpr;
 
@@ -63,7 +67,7 @@ where F: Fn(&Scalar) -> bool
 
 pub fn split_conjunctions(scalar: &Scalar) -> Vec<Scalar> {
     match scalar {
-        Scalar::AndExpr(AndExpr { left, right }) => {
+        Scalar::AndExpr(AndExpr { left, right, .. }) => {
             vec![split_conjunctions(left), split_conjunctions(right)].concat()
         }
         _ => {
@@ -74,11 +78,9 @@ pub fn split_conjunctions(scalar: &Scalar) -> Vec<Scalar> {
 
 pub fn split_equivalent_predicate(scalar: &Scalar) -> Option<(Scalar, Scalar)> {
     match scalar {
-        Scalar::ComparisonExpr(ComparisonExpr { op, left, right })
-            if *op == ComparisonOp::Equal =>
-        {
-            Some((*left.clone(), *right.clone()))
-        }
+        Scalar::ComparisonExpr(ComparisonExpr {
+            op, left, right, ..
+        }) if *op == ComparisonOp::Equal => Some((*left.clone(), *right.clone())),
         _ => None,
     }
 }
@@ -86,12 +88,96 @@ pub fn split_equivalent_predicate(scalar: &Scalar) -> Option<(Scalar, Scalar)> {
 pub fn wrap_cast_if_needed(scalar: Scalar, target_type: &DataTypeImpl) -> Scalar {
     if scalar.data_type() != *target_type {
         let cast = CastExpr {
-            from_type: scalar.data_type(),
+            from_type: Box::new(scalar.data_type()),
             argument: Box::new(scalar),
-            target_type: target_type.clone(),
+            target_type: Box::new(target_type.clone()),
         };
         cast.into()
     } else {
         scalar
+    }
+}
+
+pub fn satisfied_by(scalar: &Scalar, prop: &RelationalProperty) -> bool {
+    scalar.used_columns().is_subset(&prop.output_columns)
+}
+
+/// Helper to determine join condition type from a scalar expression.
+/// Given a query: `SELECT * FROM t(a), t1(b) WHERE a = 1 AND b = 1 AND a = b AND a+b = 1`,
+/// the predicate types are:
+/// - Left: `a = 1`
+/// - Right: `b = 1`
+/// - Both: `a = b`
+/// - Other: `a+b = 1`
+#[derive(Clone, Debug)]
+pub enum JoinCondition<'a> {
+    Left(&'a Scalar),
+    Right(&'a Scalar),
+    Both { left: &'a Scalar, right: &'a Scalar },
+    Other(&'a Scalar),
+}
+
+impl<'a> JoinCondition<'a> {
+    pub fn new(
+        scalar: &'a Scalar,
+        left_prop: &RelationalProperty,
+        right_prop: &RelationalProperty,
+    ) -> Self {
+        if contain_subquery(scalar) {
+            return Self::Other(scalar);
+        }
+        if satisfied_by(scalar, left_prop) {
+            return Self::Left(scalar);
+        }
+
+        if satisfied_by(scalar, right_prop) {
+            return Self::Right(scalar);
+        }
+
+        if let Scalar::ComparisonExpr(ComparisonExpr {
+            op: ComparisonOp::Equal,
+            left,
+            right,
+            ..
+        }) = scalar
+        {
+            if satisfied_by(left, left_prop) && satisfied_by(right, right_prop) {
+                return Self::Both { left, right };
+            }
+
+            if satisfied_by(right, left_prop) && satisfied_by(left, right_prop) {
+                return Self::Both {
+                    left: right,
+                    right: left,
+                };
+            }
+        }
+
+        Self::Other(scalar)
+    }
+}
+
+pub fn contain_subquery(scalar: &Scalar) -> bool {
+    match scalar {
+        Scalar::BoundColumnRef(BoundColumnRef { column }) => {
+            // For example: SELECT * FROM c WHERE c_id=(SELECT c_id FROM o WHERE ship='WA' AND bill='FL');
+            // predicate `c_id = scalar_subquery_{}` can't be pushed down to the join condition.
+            // TODO(xudong963): need a better way to handle this, such as add a field to predicate to indicate if it derives from subquery.
+            column.column_name == format!("scalar_subquery_{}", column.index)
+        }
+        Scalar::ComparisonExpr(ComparisonExpr { left, right, .. }) => {
+            contain_subquery(left) || contain_subquery(right)
+        }
+        Scalar::AndExpr(AndExpr { left, right, .. }) => {
+            contain_subquery(left) || contain_subquery(right)
+        }
+        Scalar::OrExpr(OrExpr { left, right, .. }) => {
+            contain_subquery(left) || contain_subquery(right)
+        }
+        Scalar::FunctionCall(FunctionCall { arguments, .. }) => {
+            arguments.iter().any(contain_subquery)
+        }
+        Scalar::CastExpr(CastExpr { argument, .. }) => contain_subquery(argument),
+        _ => false,
     }
 }

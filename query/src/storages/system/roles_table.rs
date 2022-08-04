@@ -23,13 +23,13 @@ use common_datavalues::DataField;
 use common_datavalues::DataSchemaRefExt;
 use common_datavalues::Vu8;
 use common_exception::Result;
-use common_meta_types::TableIdent;
-use common_meta_types::TableInfo;
-use common_meta_types::TableMeta;
+use common_meta_app::schema::TableIdent;
+use common_meta_app::schema::TableInfo;
+use common_meta_app::schema::TableMeta;
 
 use super::table::AsyncOneBlockSystemTable;
 use super::table::AsyncSystemTable;
-use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 use crate::storages::Table;
 
 pub struct RolesTable {
@@ -44,7 +44,7 @@ impl AsyncSystemTable for RolesTable {
         &self.table_info
     }
 
-    async fn get_full_data(&self, ctx: Arc<QueryContext>) -> Result<DataBlock> {
+    async fn get_full_data(&self, ctx: Arc<dyn TableContext>) -> Result<DataBlock> {
         let tenant = ctx.get_tenant();
         let roles = ctx.get_user_manager().get_roles(&tenant).await?;
 

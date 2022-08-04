@@ -17,11 +17,9 @@ use std::sync::Arc;
 use common_exception::ErrorCode;
 use common_exception::Result;
 use common_planners::PlanNode;
-use common_planners::ShowRolesPlan;
 use common_streams::SendableDataBlockStream;
 
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::interpreters::SelectInterpreter;
 use crate::optimizers::Optimizers;
 use crate::sessions::QueryContext;
@@ -32,8 +30,8 @@ pub struct ShowRolesInterpreter {
 }
 
 impl ShowRolesInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, _plan: ShowRolesPlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(ShowRolesInterpreter { ctx }))
+    pub fn try_create(ctx: Arc<QueryContext>) -> Result<Self> {
+        Ok(ShowRolesInterpreter { ctx })
     }
 
     fn build_query(&self) -> Result<String> {
@@ -47,17 +45,14 @@ impl Interpreter for ShowRolesInterpreter {
         "ShowRolesInterpreter"
     }
 
-    async fn execute(
-        &self,
-        input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         let query = self.build_query()?;
         let plan = PlanParser::parse(self.ctx.clone(), &query).await?;
         let optimized = Optimizers::create(self.ctx.clone()).optimize(&plan)?;
 
         if let PlanNode::Select(plan) = optimized {
             let interpreter = SelectInterpreter::try_create(self.ctx.clone(), plan)?;
-            interpreter.execute(input_stream).await
+            interpreter.execute().await
         } else {
             return Err(ErrorCode::LogicalError("Show roles build query error"));
         }

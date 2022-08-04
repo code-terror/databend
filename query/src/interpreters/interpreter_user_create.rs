@@ -21,11 +21,10 @@ use common_meta_types::UserQuota;
 use common_planners::CreateUserPlan;
 use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
-use common_tracing::tracing;
 
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
 use crate::sessions::QueryContext;
+use crate::sessions::TableContext;
 
 #[derive(Debug)]
 pub struct CreateUserInterpreter {
@@ -34,8 +33,8 @@ pub struct CreateUserInterpreter {
 }
 
 impl CreateUserInterpreter {
-    pub fn try_create(ctx: Arc<QueryContext>, plan: CreateUserPlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(CreateUserInterpreter { ctx, plan }))
+    pub fn try_create(ctx: Arc<QueryContext>, plan: CreateUserPlan) -> Result<Self> {
+        Ok(CreateUserInterpreter { ctx, plan })
     }
 }
 
@@ -45,11 +44,8 @@ impl Interpreter for CreateUserInterpreter {
         "CreateUserInterpreter"
     }
 
-    #[tracing::instrument(level = "debug", skip(self, _input_stream), fields(ctx.id = self.ctx.get_id().as_str()))]
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
+    #[tracing::instrument(level = "debug", skip(self), fields(ctx.id = self.ctx.get_id().as_str()))]
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
         let plan = self.plan.clone();
         let tenant = self.ctx.get_tenant();
 
@@ -64,7 +60,9 @@ impl Interpreter for CreateUserInterpreter {
             quota: UserQuota::no_limit(),
             option: plan.user_option,
         };
-        user_mgr.add_user(&tenant, user_info, false).await?;
+        user_mgr
+            .add_user(&tenant, user_info, plan.if_not_exists)
+            .await?;
 
         Ok(Box::pin(DataBlockStream::create(
             self.plan.schema(),

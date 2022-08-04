@@ -17,30 +17,24 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use common_base::infallible::RwLock;
 use common_exception::Result;
-use common_macros::MallocSizeOf;
 use common_meta_types::UserInfo;
 use futures::channel::oneshot::Sender;
+use parking_lot::RwLock;
 
 use crate::sessions::QueryContextShared;
 use crate::Config;
 
-#[derive(MallocSizeOf)]
 pub struct SessionContext {
-    #[ignore_malloc_size_of = "insignificant"]
     conf: Config,
     abort: AtomicBool,
     current_catalog: RwLock<String>,
     current_database: RwLock<String>,
     current_tenant: RwLock<String>,
-    #[ignore_malloc_size_of = "insignificant"]
     current_user: RwLock<Option<UserInfo>>,
-    #[ignore_malloc_size_of = "insignificant"]
+    auth_role: RwLock<Option<String>>,
     client_host: RwLock<Option<SocketAddr>>,
-    #[ignore_malloc_size_of = "insignificant"]
     io_shutdown_tx: RwLock<Option<Sender<Sender<()>>>>,
-    #[ignore_malloc_size_of = "insignificant"]
     query_context_shared: RwLock<Option<Arc<QueryContextShared>>>,
 }
 
@@ -50,6 +44,7 @@ impl SessionContext {
             conf,
             abort: Default::default(),
             current_user: Default::default(),
+            auth_role: Default::default(),
             current_tenant: Default::default(),
             client_host: Default::default(),
             current_catalog: RwLock::new("default".to_string()),
@@ -120,6 +115,17 @@ impl SessionContext {
         *lock = Some(user);
     }
 
+    // Get auth role. Auth role is the role granted by authenticator.
+    pub fn get_auth_role(&self) -> Option<String> {
+        let lock = self.auth_role.read();
+        lock.clone()
+    }
+
+    pub fn set_auth_role(&self, role: String) {
+        let mut lock = self.auth_role.write();
+        *lock = Some(role);
+    }
+
     pub fn get_client_host(&self) -> Option<SocketAddr> {
         let lock = self.client_host.read();
         *lock
@@ -141,9 +147,9 @@ impl SessionContext {
         lock.take()
     }
 
-    pub fn query_context_shared_is_none(&self) -> bool {
+    pub fn get_current_query_id(&self) -> Option<String> {
         let lock = self.query_context_shared.read();
-        lock.is_none()
+        lock.as_ref().map(|ctx| ctx.init_query_id.read().clone())
     }
 
     pub fn get_query_context_shared(&self) -> Option<Arc<QueryContextShared>> {

@@ -17,16 +17,20 @@ use std::path::Path;
 use std::sync::Arc;
 
 use common_exception::Result;
-use common_tracing::tracing;
+use common_http::HttpShutdownHandler;
 use poem::get;
+use poem::listener::RustlsCertificate;
 use poem::listener::RustlsConfig;
+use poem::middleware::CatchPanic;
+use poem::middleware::NormalizePath;
+use poem::middleware::TrailingSlash;
 use poem::put;
 use poem::Endpoint;
 use poem::EndpointExt;
 use poem::Route;
+use tracing::info;
 
 use super::v1::upload_to_stage;
-use crate::common::service::HttpShutdownHandler;
 use crate::servers::http::middleware::HTTPSessionMiddleware;
 use crate::servers::http::v1::clickhouse_router;
 use crate::servers::http::v1::query_route;
@@ -35,53 +39,82 @@ use crate::servers::Server;
 use crate::sessions::SessionManager;
 use crate::Config;
 
+#[derive(Copy, Clone)]
+pub enum HttpHandlerKind {
+    Query,
+    Clickhouse,
+}
+
+impl HttpHandlerKind {
+    pub fn usage(&self, sock: SocketAddr) -> String {
+        match self {
+            HttpHandlerKind::Query => {
+                format!(
+                    r#" curl -u root: --request POST '{:?}/v1/query/' --header 'Content-Type: application/json' --data-raw '{{"sql": "SELECT avg(number) FROM numbers(100000000)"}}'
+"#,
+                    sock,
+                )
+            }
+            HttpHandlerKind::Clickhouse => {
+                let json = r#"{"foo": "bar"}"#;
+                format!(
+                    r#" echo 'create table test(foo string)' | curl -u root: '{:?}' --data-binary  @-
+echo '{}' | curl -u root: '{:?}/?query=INSERT%20INTO%20test%20FORMAT%20JSONEachRow' --data-binary @-"#,
+                    sock, json, sock,
+                )
+            }
+        }
+    }
+}
+
 pub struct HttpHandler {
     session_manager: Arc<SessionManager>,
     shutdown_handler: HttpShutdownHandler,
+    kind: HttpHandlerKind,
 }
 
 impl HttpHandler {
-    pub fn create(session_manager: Arc<SessionManager>) -> Box<dyn Server> {
+    pub fn create(session_manager: Arc<SessionManager>, kind: HttpHandlerKind) -> Box<dyn Server> {
         Box::new(HttpHandler {
             session_manager,
             shutdown_handler: HttpShutdownHandler::create("http handler".to_string()),
+            kind,
         })
     }
 
-    pub fn usage(sock: SocketAddr) -> String {
-        let json = r#"{"foo": "bar"}"#;
-        format!(
-            r#" examples:
-curl --request POST '{:?}/v1/query/' --header 'Content-Type: application/json' --data-raw '{{"sql": "SELECT avg(number) FROM numbers(100000000)"}}'
-echo '{}' | curl '{:?}/clickhouse/?query=INSERT%20INTO%20test%20FORMAT%20JSONEachRow' --data-binary @-"#,
-            sock, json, sock
-        )
-    }
-
     fn build_router(&self, sock: SocketAddr) -> impl Endpoint {
-        Route::new()
-            .at(
-                "/",
-                get(poem::endpoint::make_sync(move |_| Self::usage(sock))),
-            )
-            .nest("/clickhouse", clickhouse_router())
-            .nest("/v1/query", query_route())
-            .at("/v1/streaming_load", put(streaming_load))
-            .at("/v1/upload_to_stage", put(upload_to_stage))
-            .with(HTTPSessionMiddleware {
-                session_manager: self.session_manager.clone(),
-            })
-            .boxed()
+        let ep = match self.kind {
+            HttpHandlerKind::Query => Route::new()
+                .at(
+                    "/",
+                    get(poem::endpoint::make_sync(move |_| {
+                        HttpHandlerKind::Query.usage(sock)
+                    })),
+                )
+                .nest("/clickhouse", clickhouse_router())
+                .nest("/v1/query", query_route())
+                .at("/v1/streaming_load", put(streaming_load))
+                .at("/v1/upload_to_stage", put(upload_to_stage)),
+            HttpHandlerKind::Clickhouse => Route::new().nest("/", clickhouse_router()),
+        };
+        ep.with(HTTPSessionMiddleware {
+            kind: self.kind,
+            session_manager: self.session_manager.clone(),
+        })
+        .with(NormalizePath::new(TrailingSlash::Trim))
+        .with(CatchPanic::new())
+        .boxed()
     }
 
     fn build_tls(config: &Config) -> Result<RustlsConfig> {
-        let mut cfg = RustlsConfig::new()
+        let certificate = RustlsCertificate::new()
             .cert(std::fs::read(
                 &config.query.http_handler_tls_server_cert.as_str(),
             )?)
             .key(std::fs::read(
                 &config.query.http_handler_tls_server_key.as_str(),
             )?);
+        let mut cfg = RustlsConfig::new().fallback(certificate);
         if Path::new(&config.query.http_handler_tls_server_root_ca_cert).exists() {
             cfg = cfg.client_auth_required(std::fs::read(
                 &config.query.http_handler_tls_server_root_ca_cert.as_str(),
@@ -91,7 +124,7 @@ echo '{}' | curl '{:?}/clickhouse/?query=INSERT%20INTO%20test%20FORMAT%20JSONEac
     }
 
     async fn start_with_tls(&mut self, listening: SocketAddr) -> Result<SocketAddr> {
-        tracing::info!("Http Handler TLS enabled");
+        info!("Http Handler TLS enabled");
 
         let config = self.session_manager.get_conf();
         let tls_config = Self::build_tls(&config)?;

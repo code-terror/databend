@@ -12,18 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use common_base::base::tokio::sync::broadcast;
-use common_base::base::HttpShutdownHandler;
 use common_base::base::Stoppable;
 use common_exception::Result;
-use common_tracing::tracing;
+use common_http::health_handler;
+use common_http::home::debug_home_handler;
+#[cfg(feature = "memory-profiling")]
+use common_http::jeprof::debug_jeprof_dump_handler;
+use common_http::pprof::debug_pprof_handler;
+use common_http::HttpShutdownHandler;
 use poem::get;
+use poem::listener::RustlsCertificate;
 use poem::listener::RustlsConfig;
 use poem::Endpoint;
 use poem::EndpointExt;
 use poem::Route;
+use tracing::info;
+use tracing::warn;
 
 use crate::configs::Config;
 use crate::meta_service::MetaNode;
@@ -44,46 +52,51 @@ impl HttpService {
     }
 
     fn build_router(&self) -> impl Endpoint {
-        Route::new()
-            .at("/v1/health", get(super::http::v1::health::health_handler))
+        #[cfg_attr(not(feature = "memory-profiling"), allow(unused_mut))]
+        let mut route = Route::new()
+            .at("/v1/health", get(health_handler))
             .at("/v1/config", get(super::http::v1::config::config_handler))
             .at(
                 "/v1/cluster/nodes",
                 get(super::http::v1::cluster_state::nodes_handler),
             )
             .at(
-                "/v1/cluster/state",
-                get(super::http::v1::cluster_state::state_handler),
+                "/v1/cluster/status",
+                get(super::http::v1::cluster_state::status_handler),
             )
             .at(
                 "/v1/metrics",
                 get(super::http::v1::metrics::metrics_handler),
             )
-            .at(
-                "/debug/home",
-                get(super::http::debug::home::debug_home_handler),
-            )
-            .at(
-                "/debug/pprof/profile",
-                get(super::http::debug::pprof::debug_pprof_handler),
-            )
-            .data(self.meta_node.clone())
-            .data(self.cfg.clone())
+            .at("/debug/home", get(debug_home_handler))
+            .at("/debug/pprof/profile", get(debug_pprof_handler));
+
+        #[cfg(feature = "memory-profiling")]
+        {
+            route = route.at(
+                // to follow the conversions of jepref, we arrange the path in
+                // this way, so that jeprof could be invoked like:
+                //   `jeprof ./target/debug/databend-meta http://localhost:28002/debug/mem`
+                // and jeprof will translate the above url into sth like:
+                //    "http://localhost:28002/debug/mem/pprof/profile?seconds=30"
+                "/debug/mem/pprof/profile",
+                get(debug_jeprof_dump_handler),
+            );
+        };
+        route.data(self.meta_node.clone()).data(self.cfg.clone())
     }
 
     fn build_tls(config: &Config) -> Result<RustlsConfig> {
         let conf = config.clone();
-        let tls_cert = conf.admin_tls_server_cert;
-        let tls_key = conf.admin_tls_server_key;
-
-        let cfg = RustlsConfig::new()
-            .cert(std::fs::read(tls_cert.as_str())?)
-            .key(std::fs::read(tls_key.as_str())?);
+        let tls_cert = std::fs::read(conf.admin_tls_server_cert.as_str())?;
+        let tls_key = std::fs::read(conf.admin_tls_server_key)?;
+        let certificate = RustlsCertificate::new().cert(tls_cert).key(tls_key);
+        let cfg = RustlsConfig::new().fallback(certificate);
         Ok(cfg)
     }
 
-    async fn start_with_tls(&mut self, listening: String) -> Result<()> {
-        tracing::info!("Http API TLS enabled");
+    async fn start_with_tls(&mut self, listening: SocketAddr) -> Result<()> {
+        info!("Http API TLS enabled");
 
         let tls_config = Self::build_tls(&self.cfg.clone())?;
         self.shutdown_handler
@@ -92,8 +105,8 @@ impl HttpService {
         Ok(())
     }
 
-    async fn start_without_tls(&mut self, listening: String) -> Result<()> {
-        tracing::warn!("Http API TLS not set");
+    async fn start_without_tls(&mut self, listening: SocketAddr) -> Result<()> {
+        warn!("Http API TLS not set");
 
         self.shutdown_handler
             .start_service(listening, None, self.build_router())
@@ -106,9 +119,10 @@ impl HttpService {
 impl Stoppable for HttpService {
     async fn start(&mut self) -> Result<()> {
         let conf = self.cfg.clone();
+        let listening = conf.admin_api_address.parse::<SocketAddr>()?;
         match conf.admin_tls_server_key.is_empty() || conf.admin_tls_server_cert.is_empty() {
-            true => self.start_without_tls(conf.admin_api_address).await,
-            false => self.start_with_tls(conf.admin_api_address).await,
+            true => self.start_without_tls(listening).await,
+            false => self.start_with_tls(listening).await,
         }
     }
 

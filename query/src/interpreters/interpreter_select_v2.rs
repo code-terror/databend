@@ -14,30 +14,46 @@
 
 use std::sync::Arc;
 
+use common_datavalues::DataSchemaRef;
+use common_exception::ErrorCode;
 use common_exception::Result;
 use common_streams::SendableDataBlockStream;
-use common_tracing::tracing;
 
+use super::plan_schedulers::schedule_query_v2;
+use crate::clusters::ClusterHelper;
 use crate::interpreters::stream::ProcessorExecutorStream;
 use crate::interpreters::Interpreter;
-use crate::interpreters::InterpreterPtr;
-use crate::pipelines::new::executor::PipelineExecutor;
-use crate::pipelines::new::executor::PipelinePullingExecutor;
+use crate::pipelines::executor::PipelinePullingExecutor;
+use crate::pipelines::Pipeline;
 use crate::sessions::QueryContext;
-use crate::sql::Planner;
+use crate::sessions::TableContext;
+use crate::sql::executor::PhysicalPlanBuilder;
+use crate::sql::executor::PipelineBuilder;
+use crate::sql::optimizer::SExpr;
+use crate::sql::BindContext;
+use crate::sql::MetadataRef;
 
-/// Interpret SQL query with new SQL planner
+/// Interpret SQL query with ne&w SQL planner
 pub struct SelectInterpreterV2 {
     ctx: Arc<QueryContext>,
-    query: String,
+    s_expr: SExpr,
+    bind_context: BindContext,
+    metadata: MetadataRef,
 }
 
 impl SelectInterpreterV2 {
-    pub fn try_create(ctx: Arc<QueryContext>, query: &str) -> Result<InterpreterPtr> {
-        Ok(Arc::new(SelectInterpreterV2 {
+    pub fn try_create(
+        ctx: Arc<QueryContext>,
+        bind_context: BindContext,
+        s_expr: SExpr,
+        metadata: MetadataRef,
+    ) -> Result<Self> {
+        Ok(SelectInterpreterV2 {
             ctx,
-            query: query.to_string(),
-        }))
+            s_expr,
+            bind_context,
+            metadata,
+        })
     }
 }
 
@@ -47,25 +63,86 @@ impl Interpreter for SelectInterpreterV2 {
         "SelectInterpreterV2"
     }
 
-    #[tracing::instrument(level = "debug", name = "select_interpreter_v2_execute", skip(self, _input_stream), fields(ctx.id = self.ctx.get_id().as_str()))]
-    async fn execute(
-        &self,
-        _input_stream: Option<SendableDataBlockStream>,
-    ) -> Result<SendableDataBlockStream> {
-        let mut planner = Planner::new(self.ctx.clone());
-        let (root_pipeline, pipelines) = planner.plan_sql(self.query.as_str()).await?;
-        let async_runtime = self.ctx.get_storage_runtime();
+    fn schema(&self) -> DataSchemaRef {
+        self.bind_context.output_schema()
+    }
 
-        // Spawn sub-pipelines
-        for pipeline in pipelines {
-            let executor = PipelineExecutor::create(async_runtime.clone(), pipeline)?;
-            executor.execute()?;
+    #[tracing::instrument(level = "debug", name = "select_interpreter_v2_execute", skip(self), fields(ctx.id = self.ctx.get_id().as_str()))]
+    async fn execute(&self) -> Result<SendableDataBlockStream> {
+        let builder = PhysicalPlanBuilder::new(self.metadata.clone());
+        let physical_plan = builder.build(&self.s_expr)?;
+        if let Some(handle) = self.ctx.get_http_query() {
+            return handle
+                .execute(self.ctx.clone(), &physical_plan, &self.bind_context.columns)
+                .await;
         }
+        if self.ctx.get_cluster().is_empty() {
+            let last_schema = physical_plan.output_schema()?;
+            let pb = PipelineBuilder::create(self.ctx.clone());
+            let mut build_res = pb.finalize(&physical_plan)?;
 
-        // Spawn root pipeline
-        let executor = PipelinePullingExecutor::try_create(async_runtime, root_pipeline)?;
-        let executor_stream = Box::pin(ProcessorExecutorStream::create(executor)?);
-        Ok(Box::pin(self.ctx.try_create_abortable(executor_stream)?))
+            // Render result set with given output schema
+            PipelineBuilder::render_result_set(
+                last_schema,
+                &self.bind_context.columns,
+                &mut build_res.main_pipeline,
+            )?;
+
+            let async_runtime = self.ctx.get_storage_runtime();
+            let query_need_abort = self.ctx.query_need_abort();
+            build_res.set_max_threads(self.ctx.get_settings().get_max_threads()? as usize);
+
+            let executor = PipelinePullingExecutor::from_pipelines(
+                async_runtime,
+                query_need_abort,
+                build_res,
+            )?;
+
+            let stream = ProcessorExecutorStream::create(executor)?;
+            Ok(Box::pin(Box::pin(stream)))
+        } else {
+            // Cluster mode
+            let build_res =
+                schedule_query_v2(self.ctx.clone(), &self.bind_context.columns, &physical_plan)
+                    .await?;
+
+            let async_runtime = self.ctx.get_storage_runtime();
+            let query_need_abort = self.ctx.query_need_abort();
+
+            let executor = PipelinePullingExecutor::from_pipelines(
+                async_runtime,
+                query_need_abort,
+                build_res,
+            )?;
+            let stream = ProcessorExecutorStream::create(executor)?;
+            Ok(Box::pin(Box::pin(stream)))
+        }
+    }
+
+    /// This method will create a new pipeline
+    /// The QueryPipelineBuilder will use the optimized plan to generate a Pipeline
+    async fn create_new_pipeline(&self) -> Result<Pipeline> {
+        let builder = PhysicalPlanBuilder::new(self.metadata.clone());
+        let physical_plan = builder.build(&self.s_expr)?;
+        let last_schema = physical_plan.output_schema()?;
+
+        let pipeline_builder = PipelineBuilder::create(self.ctx.clone());
+        let mut build_res = pipeline_builder.finalize(&physical_plan)?;
+
+        PipelineBuilder::render_result_set(
+            last_schema,
+            &self.bind_context.columns,
+            &mut build_res.main_pipeline,
+        )?;
+
+        build_res.set_max_threads(self.ctx.get_settings().get_max_threads()? as usize);
+
+        if !build_res.sources_pipelines.is_empty() {
+            return Err(ErrorCode::UnImplement(
+                "Unsupported run query with sub-pipeline".to_string(),
+            ));
+        }
+        Ok(build_res.main_pipeline)
     }
 
     async fn start(&self) -> Result<()> {
